@@ -1,0 +1,71 @@
+---
+title: "Conditionsk"
+output: html_notebook
+---
+
+# Grid approximation
+
+2.41 - Page 40
+(1) Define the grid. This means you decide how many points to use in estimating the
+posterior, and then you make a list of the parameter values on the grid.
+(2) Compute the value of the prior at each parameter value on the grid.
+(3) Compute the likelihood at each parameter value.
+(4) Compute the unstandardized posterior at each parameter value, by multiplying the
+prior by the likelihood.
+(5) Finally, standardize the posterior, by dividing each value by the sum of all values.
+
+```{r}
+# define grid
+p_grid <- seq( from=0 , to=1 , length.out=20 )
+# define prior
+prior <- rep( 1 , 20 )
+prior <- ifelse( p_grid < 0.5 , 0 , 1 ) # Other priors
+prior <- exp( -5*abs( p_grid - 0.5 ) ) # Other priors
+
+# compute likelihood at each value in grid
+likelihood <- dbinom( 6 , size=9 , prob=p_grid )
+# compute product of likelihood and prior
+unstd.posterior <- likelihood * prior
+# standardize the posterior, so it sums to 1
+posterior <- unstd.posterior / sum(unstd.posterior)
+```
+
+```{r}
+plot( p_grid , posterior , type="b" ,
+xlab="probability of water" , ylab="posterior probability" )
+mtext( "20 points" )
+```
+
+## Quadratic approximation
+
+(1) Find the posterior mode. This is usually accomplished by some optimization algorithm,
+a procedure that virtually “climbs” the posterior distribution, as if it were a
+mountain. The golem doesn’t know where the peak is, but it does know the slope
+under its feet. There are many well-developed optimization procedures, most of
+them more clever than simple hill climbing. But all of them try to find peaks.
+(2) Once you find the peak of the posterior, you must estimate the curvature near the
+peak. This curvature is sufficient to compute a quadratic approximation of the
+entire posterior distribution. In some cases, these calculations can be done analytically,
+but usually your computer uses some numerical technique instead.
+
+```{r}
+
+library(rethinking)
+globe.qa <- map(
+    alist(
+      w ~ dbinom(9,p) , # binomial likelihood
+      p ~ dunif(0,1) # uniform prior
+    ) ,
+  data=list(w=6) )
+# display summary of quadratic approximation
+precis( globe.qa )
+
+
+# analytical calculation 2.7
+w <- 6
+n <- 9
+curve( dbeta( x , w+1 , n-w+1 ) , from=0 , to=1 )
+# quadratic approximation
+curve( dnorm( x , 0.67 , 0.16 ) , lty=2 , add=TRUE )
+```
+

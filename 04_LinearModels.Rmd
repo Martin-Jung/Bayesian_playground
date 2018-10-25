@@ -1,0 +1,248 @@
+---
+title: "Linear models"
+output: html_notebook
+---
+
+## Linear models
+
+```{r}
+library(tidyverse)
+library(rethinking)
+data("Howell1")
+d <- Howell1
+
+str(d)
+
+d2 <- d[ d$age >= 18 , ]
+
+# Plot 
+dens(d2$height)
+
+
+```
+
+Define gaussian as $h_i ~ Normal(\mu, \sigma) $ 
+i for index
+
+```{r}
+# Plot prior
+
+curve( dnorm( x , 178 , 20 ) , from=100 , to=250 )
+
+# Uniform prior
+curve( dunif( x , 0 , 50 ) , from=-10 , to=60 )
+# 50 cme sd upper estimate. 95 % lie within 100cm of the average height
+
+
+# Sample those priors
+sample_mu <- rnorm( 1e4 , 178 , 20 )
+sample_sigma <- runif( 1e4 , 0 , 50 )
+prior_h <- rnorm( 1e4 , sample_mu , sample_sigma )
+dens( prior_h )
+
+# Expected distribution of heights averaged over the prior
+
+```
+
+Now approximate using grid approximation
+
+```{r}
+
+mu.list <- seq( from=140, to=160 , length.out=200 ) # Means
+sigma.list <- seq( from=4 , to=9 , length.out=200 ) # Sigma
+post <- expand.grid( mu=mu.list , sigma=sigma.list ) # All possible combinations
+# Sum likelihood
+post$LL <- sapply( 1:nrow(post) , function(i) sum( dnorm(
+            d2$height ,
+            mean=post$mu[i] ,
+            sd=post$sigma[i] ,
+          log=TRUE ) ) )
+# Bayes therorm. Likelihood + prior
+post$prod <- post$LL + dnorm( post$mu , 178 , 20 , TRUE ) + dunif( post$sigma , 0 , 50 , TRUE )
+post$prob <- exp( post$prod - max(post$prod) )
+
+# Posterior distribution in post$prob 
+contour_xyz( post$mu , post$sigma , post$prob )
+image_xyz( post$mu , post$sigma , post$prob )
+
+# Sample from the posterior 10000 times
+sample.rows <- sample( 1:nrow(post) , size=1e4 , replace=TRUE, prob=post$prob )
+sample.mu <- post$mu[ sample.rows ]
+sample.sigma <- post$sigma[ sample.rows ]
+
+plot( sample.mu , sample.sigma , cex=0.5 , pch=16 , col=col.alpha(rangi2,0.1) )
+
+# Marginal posterior densities of mu and sigma 
+dens(sample.mu)
+dens(sample.sigma)
+
+#Highest posterior density intervals
+HPDI(sample.mu)
+HPDI(sample.sigma)
+
+
+
+```
+
+# -------------- #
+Using quadratic approximation
+
+```{r}
+library(rethinking)
+data(Howell1)
+d <- Howell1
+d2 <- d[ d$age >= 18 , ]
+
+# Alist does not evaluate the code in it!
+flist <- alist(
+  height ~ dnorm( mu , sigma ) ,
+  mu ~ dnorm( 178 , 20 ) ,
+  sigma ~ dunif( 0 , 50 )
+)
+
+m4.1 <- rethinking::map(flist ,start = list( mu = mean(d2$height), sigma = sd(d2$height)),
+                          data=d2 )
+
+precis( m4.1 )
+
+# Specify slightly better priors
+m4.2 <- rethinking::map(
+  alist(
+    height ~ dnorm( mu , sigma ) ,
+    mu ~ dnorm( 178 , 0.1 ) ,
+    sigma ~ dunif( 0 , 50 )
+  ),
+  data=d2 )
+
+# Hardly moves from the mean / mu as this is how we specified sigma
+precis( m4.2 )
+
+# Sample from the posterior
+library(rethinking)
+post <- extract.samples( m4.1 , n=1e4 )
+head(post)
+
+precis(post)
+plot(post)
+
+```
+ 
+
+# Linear regressions with predictors
+
+```{r}
+
+# Load and specificy linear model
+
+library(rethinking)
+data(Howell1)
+d <- Howell1
+d2 <- d[ d$age >= 18 , ]
+
+m4.3 <- rethinking::map(
+  alist(
+    height ~ dnorm( mu , sigma ) ,
+    mu <- alpha + beta*weight ,
+    alpha ~ dnorm( 156 , 100 ) ,
+    beta ~ dnorm( 0 , 10 ) ,
+    sigma ~ dunif( 0 , 50 )
+  ),
+data=d2 )
+
+precis(m4.3,corr = T)
+post <- extract.samples( m4.3 , n=1e4 )
+dens(post$beta)
+# Perfectly correlated parameters
+cov2cor(vcov(m4.3))
+
+# Lets center by the mean
+d2$weight.c <- d2$weight - mean(d2$weight)
+
+m4.4 <- rethinking::map(
+    alist(
+      height ~ dnorm( mu , sigma ) ,
+      mu <- alpha + beta*weight.c ,
+      alpha ~ dnorm( 178 , 100 ) ,
+      beta ~ dnorm( 0 , 10 ) ,
+      sigma ~ dunif( 0 , 50 )
+  ) ,
+  data=d2 )
+
+m4.4
+precis(m4.4,corr = T)
+
+# Plot the coefficients as line
+plot( height ~ weight , data=d2 )
+abline( a=coef(m4.3)["alpha"] , b=coef(m4.3)["beta"] )
+
+# Add uncertainty
+post <- extract.samples( m4.3 )
+post[1:5,]
+# Mean height of person with 50kg weight from the posterior
+mu_at_50 <- post$a + post$b * 50 
+dens( mu_at_50 , col=rangi2 , lwd=2 , xlab="mu|weight=50" )
+
+HPDI(mu_at_50,prob = .95)
+
+# Now do for every point to get a uncertainty estimate
+mu <- link( m4.3)
+
+# define sequence of weights to compute predictions for
+# these values will be on the horizontal axis
+weight.seq <- seq( from=25 , to=70 , by=1 )
+
+# use link to compute mu
+# for each sample from posterior
+# and for each weight in weight.seq
+mu <- link( m4.3 , data=data.frame(weight=weight.seq) )
+str(mu)
+
+# use type="n" to hide raw data
+plot( height ~ weight , d2 , type="n" )
+# loop over samples and plot each mu value
+for ( i in 1:100 ) { points( weight.seq , mu[i,] , pch=16 , col=col.alpha(rangi2,0.1) ) }
+
+# summarize the distribution of mu
+mu.mean <- apply( mu , 2 , mean )
+mu.HPDI <- apply( mu , 2 , HPDI , prob=0.89 )
+
+# plot raw data
+# fading out points to make line and interval more visible
+plot( height ~ weight , data=d2 , col=col.alpha(rangi2,0.5) )
+# plot the MAP line, aka the mean mu for each weight
+lines( weight.seq , mu.mean )
+# plot a shaded region for 89% HPDI
+shade( mu.HPDI , weight.seq )
+
+sim.height <- sim( m4.3 , data=list(weight=weight.seq),n = 1e4 )
+
+# Posterior interval
+height.PI <- apply( sim.height , 2 , PI , prob=0.90 )
+
+# Redraw
+# plot raw data
+plot( height ~ weight , d2 , col=col.alpha(rangi2,0.5) )
+# draw MAP line
+lines( weight.seq , mu.mean )
+# draw HPDI region for line
+shade( mu.HPDI , weight.seq )
+# draw PI region for simulated heights
+shade( height.PI , weight.seq )
+
+```
+
+# Polynominal regression
+
+```{r}
+
+library(rethinking)
+data(Howell1)
+d <- Howell1
+str(d)
+
+plot(d$height~d$weight)
+
+
+
+```
+

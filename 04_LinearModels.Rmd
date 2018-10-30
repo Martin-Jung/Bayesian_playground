@@ -242,6 +242,44 @@ str(d)
 
 plot(d$height~d$weight)
 
+# Standardize
+d$weight.s <- scale(d$weight)
+plot(d$weight.s)
+
+# Fit the polynominal model
+d$weight.s2 <- d$weight.s^2
+m4.5 <- map(
+    alist(
+      height ~ dnorm( mu , sigma ) ,
+      mu <- a + b1*weight.s + b2*weight.s2 ,
+      a ~ dnorm( 178 , 100 ) ,
+      b1 ~ dnorm( 0 , 10 ) ,
+      b2 ~ dnorm( 0 , 10 ) ,
+      sigma ~ dunif( 0 , 50 )
+  ) ,
+  data=d )
+
+summary( m4.5 )
+
+# Sample from the posterior the mu and sigma estimates. Get 90 credible interval
+weight.seq <- seq( from=-2.2 , to=2 , length.out=30 )
+pred_dat <- list( weight.s=weight.seq , weight.s2=weight.seq^2 )
+mu <- link( m4.5 , data=pred_dat )
+mu.mean <- apply( mu , 2 , mean )
+mu.PI <- apply( mu , 2 , PI , prob=0.90 )
+sim.height <- sim( m4.5 , data=pred_dat )
+height.PI <- apply( sim.height , 2 , PI , prob=0.90 )
+
+plot( height ~ weight.s , d , col=col.alpha(rangi2,0.5) )
+lines( weight.seq , mu.mean )
+shade( mu.PI , weight.seq )
+shade( height.PI , weight.seq )
+
+# Get back the natural scale
+plot( height ~ weight.s , d , col=col.alpha(rangi2,0.5) , xaxt="n" )
+at <- c(-2,-1,0,1,2)
+labels <- at*sd(d$weight) + mean(d$weight)
+axis( side=1 , at=at , labels=round(labels,1) )
 
 
 ```

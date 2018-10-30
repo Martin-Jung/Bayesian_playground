@@ -1,0 +1,138 @@
+---
+title: "05 Multiple regression"
+output: html_notebook
+---
+
+## Multiple regression
+
+Start off with a basic example using a test dataset
+
+```{r}
+library(rethinking)
+data(WaffleDivorce)
+d <- WaffleDivorce
+
+# standardize predictor
+d$MedianAgeMarriage.s <- (d$MedianAgeMarriage-mean(d$MedianAgeMarriage))/ sd(d$MedianAgeMarriage)
+
+# fit model
+m5.1 <- map(
+  alist(
+    Divorce ~ dnorm( mu , sigma ) , # Response divorce normal distributed
+    mu <- a + bA * MedianAgeMarriage.s , # OLS
+    a ~ dnorm( 10 , 10 ) , # intercept normal with 10 sd
+    bA ~ dnorm( 0 , 1 ) ,# beta also normal
+    sigma ~ dunif( 0 , 10 ) # sd of error uniform
+  ) , data = d )
+
+
+# compute percentile interval of mean
+MAM.seq <- seq( from=-3 , to=3.5 , length.out=30 )
+mu <- link( m5.1 , data=data.frame(MedianAgeMarriage.s=MAM.seq) )
+mu.PI <- apply( mu , 2 , PI )
+
+# plot it all
+plot( Divorce ~ MedianAgeMarriage.s , data=d , col=rangi2 )
+abline( m5.1 )
+shade( mu.PI , MAM.seq )
+
+precis(m5.1)
+
+```
+Multiple linear regression on the same dataset but adding median age at marriage
+
+```{r}
+d$Marriage.s <- scale(d$Marriage)
+m5.3 <- map(
+    alist(
+      Divorce ~ dnorm( mu , sigma ) ,
+      mu <- a + bR*Marriage.s + bA*MedianAgeMarriage.s ,
+      a ~ dnorm( 10 , 10 ) ,
+      bR ~ dnorm( 0 , 1 ) ,
+      bA ~ dnorm( 0 , 1 ) ,
+      sigma ~ dunif( 0 , 10 )
+    ) ,
+  data = d )
+
+precis( m5.3 ) # Posterior mean for marriage rate has +/- for confidence
+plot(precis(m5.3))
+
+```
+Lets plot some residuals
+
+```{r}
+# Residual plot
+m5.4 <- map(
+      alist(
+        Marriage.s ~ dnorm( mu , sigma ) ,
+        mu <- a + b*MedianAgeMarriage.s ,
+        a ~ dnorm( 0 , 10 ) ,
+        b ~ dnorm( 0 , 1 ) ,
+        sigma ~ dunif( 0 , 10 )
+      ),
+    data = d )
+
+# compute expected value at MAP, for each State
+mu <- coef(m5.4)['a'] + coef(m5.4)['b']*d$MedianAgeMarriage.s
+# compute residual for each State
+m.resid <- d$Marriage.s - mu
+
+plot( Marriage.s ~ MedianAgeMarriage.s , d , col=rangi2 )
+abline( m5.4 )
+# loop over States
+for ( i in 1:length(m.resid) ) {
+  x <- d$MedianAgeMarriage.s[i] # x location of line segment
+  y <- d$Marriage.s[i] # observed endpoint of line segment
+  # draw the line segment
+  lines( c(x,x) , c(mu[i],y) , lwd=0.5 , col=col.alpha("black",0.7) )
+}
+
+```
+Counterfactual plot (really just prediction)
+
+```{r}
+# prepare new counterfactual data 
+A.avg <- mean( d$MedianAgeMarriage.s )
+R.seq <- seq( from=-3 , to=3 , length.out=30 )
+pred.data <- data.frame(
+    Marriage.s=R.seq,
+    MedianAgeMarriage.s=A.avg
+)
+# compute counterfactual mean divorce (mu)
+mu <- link( m5.3 , data=pred.data )
+mu.mean <- apply( mu , 2 , mean )
+mu.PI <- apply( mu , 2 , PI )
+# simulate counterfactual divorce outcomes
+R.sim <- sim( m5.3 , data=pred.data , n=1e4 )
+
+## ---------- ##
+# Essentially holding one variable constant and predict
+R.PI <- apply( R.sim , 2 , PI )
+# display predictions, hiding raw data with type="n"
+plot( Divorce ~ Marriage.s , data=d , type="n" )
+mtext( "MedianAgeMarriage.s = 0" )
+lines( R.seq , mu.mean )
+shade( mu.PI , R.seq )
+shade( R.PI , R.seq )
+
+R.avg <- mean( d$Marriage.s )
+A.seq <- seq( from=-3 , to=3.5 , length.out=30 )
+pred.data2 <- data.frame(
+    Marriage.s=R.avg,
+    MedianAgeMarriage.s=A.seq
+)
+mu <- link( m5.3 , data=pred.data2 )
+mu.mean <- apply( mu , 2 , mean )
+mu.PI <- apply( mu , 2 , PI )
+A.sim <- sim( m5.3 , data=pred.data2 , n=1e4 )
+A.PI <- apply( A.sim , 2 , PI )
+
+plot( Divorce ~ MedianAgeMarriage.s , data=d , type="n" )
+mtext( "Marriage.s = 0" )
+lines( A.seq , mu.mean )
+shade( mu.PI , A.seq )
+shade( A.PI , A.seq )
+```
+
+# Posterior predictor plots
+

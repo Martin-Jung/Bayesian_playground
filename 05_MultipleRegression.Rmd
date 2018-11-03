@@ -136,3 +136,175 @@ shade( A.PI , A.seq )
 
 # Posterior predictor plots
 
+Simulare predictions averaging over the posterior
+
+```{r}
+# call link without specifying new data
+# so it uses original data
+mu <- link( m5.3 )
+# summarize samples across cases
+mu.mean <- apply( mu , 2 , mean )
+mu.PI <- apply( mu , 2 , PI )
+# simulate observations
+# again no new data, so uses original data
+divorce.sim <- sim( m5.3 , n=1e4 )
+divorce.PI <- apply( divorce.sim , 2 , PI )
+
+plot( mu.mean ~ d$Divorce , col=rangi2 , ylim=range(mu.PI) ,
+xlab="Observed divorce" , ylab="Predicted divorce" )
+abline( a=0 , b=1 , lty=2 )
+for ( i in 1:nrow(d) )
+  lines( rep(d$Divorce[i],2) , c(mu.PI[1,i],mu.PI[2,i]) ,col=rangi2 )
+```
+
+```{r}
+# ------#
+# To plot prediction error (residuals)
+# compute residuals
+divorce.resid <- d$Divorce - mu.mean
+# get ordering by divorce rate
+o <- order(divorce.resid)
+# make the plot
+dotchart( divorce.resid[o] , labels=d$Loc[o] , xlim=c(-6,5) , cex=0.6 )
+abline( v=0 , col=col.alpha("black",0.2) )
+for ( i in 1:nrow(d) ) {
+  j <- o[i] # which State in order
+  lines( d$Divorce[j]-c(mu.PI[1,j],mu.PI[2,j]) , rep(i,2) )
+  points( d$Divorce[j]-c(divorce.PI[1,j],divorce.PI[2,j]) , rep(i,2),
+  pch=3 , cex=0.6 , col="gray" )
+}
+```
+<hr>
+# Masked relationships
+
+```{r}
+data(milk)
+d <- milk
+
+# Drop missing data from predictor
+dcc <- d[ complete.cases(d) , ]
+
+# Bivariate regression
+m5.5 <- map(
+    alist(
+      kcal.per.g ~ dnorm( mu , sigma ) , # Likelihood
+      mu <- a + bn*neocortex.perc , # OLS
+      a ~ dnorm( 0 , 100 ) , # intercept
+      bn ~ dnorm( 0 , 1 ) , # beta
+      sigma ~ dunif( 0 , 1 ) # Sd of likilihood
+    ),
+data=dcc )
+
+precis(m5.5,digits = 4)
+
+# Change from the smallest percent neocortex percent in the data, 55%, to the largest, 76%, would result in an expected change of only:
+coef(m5.5)["bn"] * ( 76 - 55 )
+
+# Quite unplausible given wide range of PI
+np.seq <- 0:100 
+pred.data <- data.frame( neocortex.perc=np.seq )
+mu <- link( m5.5 , data=pred.data , n=1e4 )
+mu.mean <- apply( mu , 2 , mean )
+mu.PI <- apply( mu , 2 , PI )
+
+plot( kcal.per.g ~ neocortex.perc , data=dcc , col=rangi2 )
+lines( np.seq , mu.mean )
+lines( np.seq , mu.PI[1,] , lty=2 )
+lines( np.seq , mu.PI[2,] , lty=2 )
+
+```
+
+Add log-transformed mass
+```{r}
+dcc$log.mass <- log(dcc$mass)
+
+m5.6 <- map(
+      alist(
+          kcal.per.g ~ dnorm( mu , sigma ) ,
+          mu <- a + bm*log.mass ,
+          a ~ dnorm( 0 , 100 ) ,
+          bm ~ dnorm( 0 , 1 ) ,
+          sigma ~ dunif( 0 , 1 )
+      ) ,
+      data=dcc )
+precis(m5.6)
+
+m5.7 <- map(
+      alist(
+      kcal.per.g ~ dnorm( mu , sigma ) ,
+      mu <- a + bn*neocortex.perc + bm*log.mass , # Multiple regression with two slopes
+      a ~ dnorm( 0 , 100 ) ,
+      bn ~ dnorm( 0 , 1 ) ,
+      bm ~ dnorm( 0 , 1 ) ,
+      sigma ~ dunif( 0 , 1 )
+  ) , 
+  data = dcc)
+
+m5.7
+```
+
+How does predicted energy varies as a function of neocortex percent?
+
+```{r}
+mean.log.mass <- mean( log(dcc$mass) )
+
+# 100 prediction values
+np.seq <- 0:100
+pred.data <- data.frame(
+  neocortex.perc=np.seq,
+  log.mass=mean.log.mass
+)
+
+# link to posterior from model
+mu <- link( m5.7 , data=pred.data , n=1e4 )
+mu.mean <- apply( mu , 2 , mean )
+mu.PI <- apply( mu , 2 , PI )
+
+plot( kcal.per.g ~ neocortex.perc , data=dcc , type="n" )
+lines( np.seq , mu.mean )
+lines( np.seq , mu.PI[1,] , lty=2 )
+lines( np.seq , mu.PI[2,] , lty=2 )
+
+# Both variables cancel each other out
+```
+
+
+# Categorical variables
+
+```{r}
+
+data(Howell1)
+d <- Howell1
+
+m5.15 <- map(
+      alist(
+      height ~ dnorm( mu , sigma ) ,
+      mu <- a + bm*male ,
+      a ~ dnorm( 178 , 100 ) ,
+      bm ~ dnorm( 0 , 10 ) ,
+      sigma ~ dunif( 0 , 50 )
+      ) ,
+  data=d )
+
+precis(m5.15)
+
+post <- extract.samples(m5.15)
+mu.male <- post$a + post$bm
+PI(mu.male)
+
+# For multiple using an index value
+d <- milk
+( d$clade_id <- coerce_index(d$clade) )
+
+m5.16 <- map(
+  alist(
+      kcal.per.g ~ dnorm( mu , sigma ) ,
+      mu <- a[clade_id] ,
+      a[clade_id] ~ dnorm( 0.6 , 10 ) ,
+      sigma ~ dunif( 0 , 10 )
+    ), data=d)
+
+precis(m5.16,depth = 2)
+
+```
+

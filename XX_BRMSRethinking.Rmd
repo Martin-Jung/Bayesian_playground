@@ -1,0 +1,288 @@
+---
+title: "Rethinking with BRMS"
+output: html_notebook
+---
+
+# Bayesian models with BRMS
+
+Redoing some of the Rethinking book with the *tidyverse* and *brms* package. [https://bookdown.org/content/1850/index.html](Tutorial and code here.)
+Mainly using MCMC via Stan and the *brms* package. Idea is to redo some of the examples by McElreath but with brms or stan directly.
+
+Load all necessary packages
+```{r,echo=FALSE,message=FALSE, warning=FALSE, include=FALSE}
+source("00_PackagesFunctions.R")
+```
+
+# Prior recommendations from the [https://github.com/stan-dev/stan/wiki/Prior-Choice-Recommendations](stan project).
+
+## Stan
+
+Avoid using uniform priors!
+You think a parameter could be anywhere from 0 to 1, so you set the prior to uniform(0,1). Try normal(.5,.5) instead.
+
+## Aim to keep all parameters scale-free. Many ways of doing this:
+
+* Scale by sd of data. This is done in education settings, here the sd is the sd of test scores of all kids in a single grade, for example
+*  In a regression, take logs of (positive-constrained) predictors and outcomes, then coefs can be interpreted as elasticities
+*  Scale by some conventional value, for example if a parameter has a "typical" value of 4.5, you could work with log(theta/4.5). We did some things like this in our PK/PD project with Sebastian1. For example, in epidemiological studies it is common to standardize with the expected number of events.
+
+Keep paremeters scale free. Divide by SD or better MAD
+
+<hr>
+Code start
+
+```{r}
+# The first model from McElReath
+b3.1 <- brm(data = list(w = 6), 
+      family = binomial(link = "identity"),
+      w | trials(9) ~ 1,
+      prior = prior(beta(1, 1), class = Intercept),
+      control = list(adapt_delta = .99))
+
+posterior_summary(b3.1)["b_Intercept", ] %>% round(digits = 2)
+
+# Get simulation draws instead
+fitted_samples <- fitted(b3.1, summary = F, scale = "linear") %>%   as_tibble()
+
+```
+
+# Chapter 4 - Linear models
+
+```{r}
+library(rethinking)
+data(Howell1)
+d <- Howell1
+detach(package:rethinking,unload = T)
+
+# Linear model with brms
+d2 <- d %>% filter(age >= 18)
+
+b4.1 <- brm(data = d2, family = gaussian,
+      height ~ 1, # Intercept only model
+      prior = c(prior(normal(178, 20), class = Intercept), # mu
+                prior(uniform(0, 50), class = sigma)), # sd
+      iter = 31000, warmup = 30000, chains = 4, cores = 4)
+
+# Repeat but with a cauchy prior
+b4.1_half_cauchy <- brm(data = d2, family = gaussian,
+      height ~ 1,
+      prior = c(prior(normal(178, 20), class = Intercept),
+                prior(cauchy(0, 1), class = sigma)),
+      iter = 2000, warmup = 1000, chains = 4, cores = 4)
+
+# Inspect the chains
+plot(b4.1_half_cauchy)
+# Or via shiny interface
+launch_shinystan(b4.1_half_cauchy)
+b4.1_half_cauchy$fit
+
+# Covariance of brms object
+post <- posterior_samples(b4.1_half_cauchy)
+cov(post[, 1:2])
+
+# Or other ways of summarising:
+posterior_summary(b4.1_half_cauchy)
+
+
+```
+-
+
+```{r}
+# Multiple linear regression - 4.4.2
+b4.3 <- brm(data = d2, family = gaussian,
+      height ~ 1 + weight,
+      prior = c(prior(normal(156, 100), class = Intercept), # prior for intercep
+                prior(normal(0, 10), class = b), # for beta
+                #prior(uniform(0, 50), class = sigma)), # for sigma
+                prior(cauchy(0,1), class = sigma)), # cauchy uses less warmup
+      iter = 41000, warmup = 40000, chains = 4, cores = 4)
+
+# Center and refit (with cauchy prior)
+d2$weight.c <- d2$weight - mean(d2$weight,na.rm = T)
+
+b4.4 <- brm(data = d2, family = gaussian,
+      height ~ 1 + weight.c,
+      prior = c(prior(normal(178, 100), class = Intercept),
+                prior(normal(0, 10), class = b),
+                prior(cauchy(0, 1), class = sigma)),
+      iter = 46000, warmup = 45000, chains = 4, cores = 4,
+      control = list(adapt_delta = 0.8, 
+                     max_treedepth = 10))
+
+plot(b4.4) # Check
+posterior_summary(b4.4)[1:3, ] # Summarise
+#pairs(b4.4)
+
+
+post <- posterior_samples(b4.3)
+# Mean at 50
+mu_at_50 <- post %>% transmute(mu_at_50 = b_Intercept + b_weight * 50)
+mu_at_50 %>%
+  ggplot(aes(x = mu_at_50)) +
+  geom_density(size = 0, fill = "royalblue") +
+  stat_pointintervalh(aes(y = 0), 
+                      point_interval = mode_hdi, .width = .95) +
+  scale_y_continuous(NULL, breaks = NULL) +
+  labs(x = expression(mu["height | weight = 50"])) +
+  theme_classic()
+
+
+# Plot quick regression line and fit uncertainty of mu using brms
+weight_seq <- tibble(weight = seq(from = 25, to = 70, by = 1)) # Predata
+mu_summary <-fitted(b4.3, 
+         newdata = weight_seq) %>%
+  as_tibble() %>%
+  bind_cols(weight_seq)
+
+d2 %>%
+  ggplot(aes(x = weight, y = height)) +
+  geom_ribbon(data = mu_summary, 
+              aes(y = Estimate, ymin = Q2.5, ymax = Q97.5),
+              fill = "grey70") +
+  geom_line(data = mu_summary, 
+            aes(y = Estimate)) +
+  geom_point(color = "navyblue", shape = 1, size = 1.5, alpha = 2/3) +
+  coord_cartesian(xlim = range(d2$weight)) +
+  theme(text = element_text(family = "Arial"),
+        panel.grid = element_blank())
+
+# ...these simulations (predictions) are the joint consequence of both μ and σ, unlike the results of fitted(), which only reflect μ. 
+pred_height <-  predict(b4.3,newdata = weight_seq) %>%
+  as_tibble() %>%
+  bind_cols(weight_seq)
+  
+d2 %>%
+  ggplot(aes(x = weight)) +
+  geom_ribbon(data = pred_height, 
+              aes(y = Estimate, ymin = Q2.5, ymax = Q97.5),
+              fill = "grey83") +
+  geom_ribbon(data = mu_summary, 
+              aes(y = Estimate, ymin = Q2.5, ymax = Q97.5),
+              fill = "grey70") +
+  geom_line(data = mu_summary, aes(y = Estimate)) +
+  geom_point(aes(y = height),
+             color = "navyblue", shape = 1, size = 1.5, alpha = 2/3) +
+  coord_cartesian(xlim = range(d2$weight),
+                  ylim = range(d2$height)) +
+  theme(text = element_text(family = "Arial"),
+        panel.grid = element_blank())
+
+```
+
+# For chapter 5 - Multivariate linear models
+
+```{r}
+rm(list = ls());gc() # Cleanup
+library(rethinking)
+data(WaffleDivorce)
+d <- WaffleDivorce
+rm(WaffleDivorce)
+detach(package:rethinking, unload = T)
+
+# -------------------- #
+# Standardize
+d <-d %>%
+  mutate(MedianAgeMarriage_s = (MedianAgeMarriage - mean(MedianAgeMarriage)) /
+           sd(MedianAgeMarriage))
+
+b5.1 <- 
+  brm(data = d, family = gaussian,
+      Divorce ~ 1 + MedianAgeMarriage_s,
+      prior = c(prior(normal(10, 10), class = Intercept),
+                prior(normal(0, 1), class = b),
+                prior(uniform(0, 10), class = sigma)),
+      iter = 2000, warmup = 500, chains = 4, cores = 4)
+b5.1
+# Plot
+nd <- tibble(MedianAgeMarriage_s = seq(from = -3, to = 3.5, length.out = 30))
+
+# Now use `fitted()` to get the model-implied trajectories
+fitd_b5.1 <- 
+  fitted(b5.1, newdata = nd) %>%
+  as_tibble() %>%
+  bind_cols(nd)
+
+# Plot
+ggplot(data = fitd_b5.1, 
+       aes(x = MedianAgeMarriage_s, y = Estimate)) +
+  geom_ribbon(aes(ymin = Q2.5, ymax = Q97.5),
+              fill = "firebrick", alpha = 1/5) +
+  geom_line(color = "firebrick4") +
+  geom_point(data = d, 
+             aes(x = MedianAgeMarriage_s, y = Divorce), 
+             size = 2, color = "firebrick4") +
+  labs(y = "Divorce") +
+  coord_cartesian(xlim = range(d$MedianAgeMarriage_s), 
+                  ylim = range(d$Divorce)) +
+  theme_bw() +
+  theme(panel.grid = element_blank())                   
+
+```
+
+Multivariate model
+
+```{r}
+d <- d %>% mutate(Marriage_s = (Marriage - mean(Marriage)) / sd(Marriage))
+
+b5.3 <- 
+  brm(data = d, family = gaussian,
+      Divorce ~ 1 + Marriage_s + MedianAgeMarriage_s,
+      prior = c(prior(normal(10, 10), class = Intercept),
+                prior(normal(0, 1), class = b),
+                prior(uniform(0, 10), class = sigma)),
+      iter = 2000, warmup = 500, chains = 4, cores = 4)
+
+stanplot(b5.3)
+# Can also plot using bayes plot (draw from posterior first)
+# or using the tidybayes package
+
+library(tidybayes)
+post <- posterior_samples(b5.3)
+
+post %>% 
+  select(-lp__) %>% 
+  gather() %>% 
+  
+  ggplot(aes(x = value, y = reorder(key, value))) +  # note how we used `reorder()` to arrange the coefficients
+  geom_vline(xintercept = 0, color = "firebrick4", alpha = 1/10) +
+  geom_halfeyeh(point_interval = mode_hdi, .width = .95, 
+                      size = 3/4, color = "firebrick4",fill="grey80") +
+  labs(title = "My tidybayes-based coefficient plot",
+       x = NULL, y = NULL) +
+  theme_bw() +
+  theme(panel.grid   = element_blank(),
+        panel.grid.major.y = element_line(color = alpha("firebrick4", 1/4), linetype = 3),
+        axis.text.y  = element_text(hjust = 0),
+        axis.ticks.y = element_blank())
+
+# Generally
+tibble(`brms function` = c("fitted", "predict", "residual"),
+       mean  = c("same as the data", "same as the data", "in a deviance-score metric"),
+       scale = c("excludes sigma", "includes sigma", "excludes sigma"))
+
+
+
+```
+
+
+# Skipping some. Moving on with categorical variables
+
+```{r}
+rm(list = ls())
+library(rethinking)
+data(Howell1)
+d <- Howell1
+rm(Howell1)
+detach(package:rethinking, unload = T)
+
+b5.15 <- brm(data = d, family = gaussian,
+      height ~ 1 + male,
+      prior = c(prior(normal(178, 100), class = Intercept),
+                prior(normal(0, 10), class = b),
+                prior(cauchy(0, 2), class = sigma)),
+      iter = 2000, warmup = 500, chains = 4, cores = 4)
+print(b5.15)
+
+fitted(b5.15,    newdata = data.frame(male = c(0,1)))
+```
+

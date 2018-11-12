@@ -1,0 +1,101 @@
+---
+title: "6  Overfitting"
+output: html_notebook
+---
+
+# Chapter 6 - Overfitting
+
+```{r}
+sppnames <- c( "afarensis","africanus","habilis","boisei", "rudolfensis","ergaster","sapiens")
+brainvolcc <- c( 438 , 452 , 612, 521, 752, 871, 1350 )
+masskg <- c( 37.0 , 35.5 , 34.5 , 41.5 , 55.5 , 61.0 , 53.5 )
+d <- data.frame( species=sppnames , brain=brainvolcc , mass=masskg )
+
+# Do some bad fits
+m6.1 <- lm( brain ~ mass , data=d )
+1 - var(resid(m6.1))/var(d$brain) # R2
+# Some polynoms to horribly overfit
+m6.3 <- lm( brain ~ mass + I(mass^2) + I(mass^3), data=d )
+m6.4 <- lm( brain ~ mass + I(mass^2) + I(mass^3) + I(mass^4),data=d )
+m6.5 <- lm( brain ~ mass + I(mass^2) + I(mass^3) + I(mass^4) + I(mass^5) , data=d )
+
+```
+
+# Model comparison and model averaging - 6.5.1
+
+```{r}
+library(rethinking)
+data(milk)
+d <- milk[ complete.cases(milk) , ]
+d$neocortex <- d$neocortex.perc / 100
+
+
+a.start <- mean(d$kcal.per.g)
+sigma.start <- log(sd(d$kcal.per.g))
+
+# All flat priors
+m6.11 <- map(
+      alist(
+        kcal.per.g ~ dnorm( a , exp(log.sigma) ) # Just intercept
+        ) ,
+      data=d , start=list(a=a.start,log.sigma=sigma.start) )
+
+m6.12 <- map(
+      alist(
+        kcal.per.g ~ dnorm( mu , exp(log.sigma) ) , # Intercept
+        mu <- a + bn*neocortex # Neocortex
+        ) ,
+      data=d , start=list(a=a.start,bn=0,log.sigma=sigma.start) )
+m6.13 <- map(
+    alist(
+      kcal.per.g ~ dnorm( mu , exp(log.sigma) ) ,
+      mu <- a + bm*log(mass) # Log mass
+    ) ,
+    data=d , start=list(a=a.start,bm=0,log.sigma=sigma.start) )
+m6.14 <- map(
+    alist(
+      kcal.per.g ~ dnorm( mu , exp(log.sigma) ) ,
+      mu <- a + bn*neocortex + bm*log(mass) # Log mass and neocortex
+    ) ,
+  data=d , start=list(a=a.start,bn=0,bm=0,log.sigma=sigma.start) )
+
+# Compare
+( milk.models <- compare( m6.11 , m6.12 , m6.13 , m6.14 ) )
+plot( milk.models , SE=TRUE , dSE=TRUE )
+plot( coeftab(m6.11,m6.12,m6.13,m6.14) )
+
+```
+
+
+```{r}
+# First simulate / predict from the model
+
+# compute counterfactual predictions 6.29
+# neocortex from 0.5 to 0.8
+nc.seq <- seq(from=0.5,to=0.8,length.out=30)
+d.predict <- list(
+  kcal.per.g = rep(0,30), # empty outcome
+  neocortex = nc.seq, # sequence of neocortex
+  mass = rep(4.5,30) # average mass
+)
+pred.m6.14 <- link( m6.14 , data=d.predict )
+mu <- apply( pred.m6.14 , 2 , mean )
+mu.PI <- apply( pred.m6.14 , 2 , PI )
+
+# plot it all
+plot( kcal.per.g ~ neocortex , d , col=rangi2 )
+lines( nc.seq , mu , lty=2 )
+lines( nc.seq , mu.PI[1,] , lty=2 )
+lines( nc.seq , mu.PI[2,] , lty=2 )
+
+#---#
+# Model ensemble | Model averaging
+milk.ensemble <- ensemble( m6.11 , m6.12 , m6.13 , m6.14 , data=d.predict )
+mu <- apply( milk.ensemble$link , 2 , mean )
+mu.PI <- apply( milk.ensemble$link , 2 , PI )
+plot( kcal.per.g ~ neocortex , d , col=rangi2 )
+lines( nc.seq , mu )
+shade( mu.PI , nc.seq )
+
+```
+

@@ -286,3 +286,169 @@ print(b5.15)
 fitted(b5.15,    newdata = data.frame(male = c(0,1)))
 ```
 
+<hr>
+
+# Chapter 6
+```{r Overfitting}
+
+sppnames <- c( "afarensis","africanus","habilis","boisei", "rudolfensis","ergaster","sapiens")
+brainvolcc <- c( 438 , 452 , 612, 521, 752, 871, 1350 )
+masskg <- c( 37.0 , 35.5 , 34.5 , 41.5 , 55.5 , 61.0 , 53.5 )
+d <- data.frame( species=sppnames , brain=brainvolcc , mass=masskg ) %>% 
+  # Standardize Mass
+  mutate(mass_s = (mass - mean(mass)) / sd(mass))
+
+# Here we specify our starting values
+inits <- list(Intercept = mean(d$brain), # Intercept as mean
+              mass_s    = 0, # mass 0
+              sigma     = sd(d$brain)) # uncertainty to sd
+
+# Need as many lists as MCMC chains 
+# -> Could mix starting values among chains
+inits_list <-list(inits, inits, inits, inits)
+
+# The model
+b6.8 <- 
+  brm(data = d, family = gaussian,
+      brain ~ 1 + mass_s,
+      prior = c(prior(normal(0, 1000), class = Intercept),
+                prior(normal(0, 1000), class = b),
+                prior(cauchy(0, 10), class = sigma)),
+      iter = 2000, warmup = 1000, chains = 4, cores = 4,
+      inits = inits_list)  # Here we put our start values in the `brm()` function
+b6.8
+
+# Loglik per HMC iteration
+dfLL <- b6.8 %>%
+  log_lik() %>%
+  as_tibble() %>% 
+  # Deviance as sum of likelihood multiplied by -2
+  mutate(sums  = rowSums(.),
+         deviance = -2*sums)
+
+# Plot deviance
+dfLL %>%
+  ggplot(aes(x = deviance, y = 0)) +
+  geom_halfeyeh(point_interval = median_qi, .width = .95) +
+  scale_x_continuous(breaks = quantile(dfLL$deviance, c(.025, .5, .975)),
+                     labels = quantile(dfLL$deviance, c(.025, .5, .975)) %>% round(1)) +
+  scale_y_continuous(NULL, breaks = NULL) +
+  labs(title = "The deviance distribution") +
+  theme_classic() 
+
+```
+
+The WAIC with brms is straight forward for both model comparison and model averaging, however loo seems to be prefered these days
+
+```{r}
+library(rethinking)
+data(milk)
+
+d <- milk %>%
+  filter(complete.cases(.)) %>%
+  mutate(neocortex = neocortex.perc / 100)
+rm(milk)
+
+detach(package:rethinking, unload = T)
+library(brms)
+
+# Initialize with mean and standard deviation
+inits <- list(Intercept = mean(d$kcal.per.g),
+              sigma     = sd(d$kcal.per.g))
+
+inits_list <-list(inits, inits, inits, inits)
+
+b6.11 <- brm(data = d, family = gaussian,
+      kcal.per.g ~ 1, # Intercept only
+      prior = c(prior(uniform(-1000, 1000), class = Intercept), # Very uninformative priors
+                prior(uniform(0, 100), class = sigma)),
+      iter = 2000, warmup = 1000, chains = 4, cores = 4,
+      inits = inits_list)
+
+# Second model. Regress agains neocortex
+inits <- list(Intercept = mean(d$kcal.per.g),
+              neocortex = 0,
+              sigma     = sd(d$kcal.per.g))
+b6.12 <- brm(data = d, family = gaussian,
+      kcal.per.g ~ 1 + neocortex,
+      prior = c(prior(uniform(-1000, 1000), class = Intercept),
+                prior(uniform(-1000, 1000), class = b),
+                prior(uniform(0, 100), class = sigma)),
+      iter = 2000, warmup = 1000, chains = 4, cores = 4,
+      inits = inits_list)
+
+# Then create some secondary models by updating them
+inits <- list(Intercept   = mean(d$kcal.per.g),
+              `log(mass)` = 0,
+              sigma       = sd(d$kcal.per.g))
+
+b6.13 <-update(b6.12, 
+         newdata = d,
+         formula = kcal.per.g ~ 1 + log(mass),
+         inits   = inits_list)
+
+# Lastly
+inits <- list(Intercept   = mean(d$kcal.per.g),
+              neocortex   = 0,
+              `log(mass)` = 0,
+              sigma       = sd(d$kcal.per.g))
+b6.14 <- update(b6.13, 
+         newdata = d,
+         formula = kcal.per.g ~ 1 + neocortex + log(mass),
+         inits   = inits_list)
+
+# Compare all
+waic(b6.11, b6.12, b6.13, b6.14)
+# Model weights
+model_weights(b6.11, b6.12, b6.13, b6.14, weights = "waic")
+
+LOO(b6.14)# The LOO
+
+# Averaged parameters across best models
+posterior_average(b6.13,b6.14, weights = "waic")
+
+# Now construct a model average model
+# we need new data for both the `fitted()` and `pp_average()` functions
+nd <- tibble(neocortex = seq(from = .5, to = .8, length.out = 30),
+         mass = rep(4.5, times = 30))
+
+# we'll get the `b6.14`-implied trajectory with `fitted()`
+fitd_b6.14 <- fitted(b6.14, newdata = nd) %>%
+  as_tibble() %>%
+  bind_cols(nd)
+
+# the model-average trajectory comes from `pp_average()`
+pp_average(b6.11, b6.12, b6.13, b6.14,
+           weights = "waic",
+           method  = "fitted",  # for new data predictions, use `method = "predict"`
+           newdata = nd) %>%
+  as_tibble() %>%
+  bind_cols(nd) %>%
+  
+  # plot Figure 
+ggplot(aes(x = neocortex, y = Estimate)) +
+  geom_ribbon(aes(ymin = Q2.5, ymax = Q97.5), alpha = 1/4) +
+  geom_line(color   = "red") +
+  geom_ribbon(data  = fitd_b6.14, aes(ymin = Q2.5, ymax = Q97.5),
+              color = "grey80", fill = "transparent", linetype = 2) +
+  geom_line(data = fitd_b6.14, linetype = 2) +
+  geom_point(data = d, aes(x = neocortex, y = kcal.per.g), 
+             size = 2) +
+  labs(y = "kcal.per.g") +
+  coord_cartesian(xlim = range(d$neocortex), 
+                  ylim = range(d$kcal.per.g)) +
+  theme_gray() 
+
+
+# ----- #
+# Bayesian R2
+bayes_R2(b6.14)
+
+# Plot marginal effects
+plot(marginal_effects(b6.14,
+                      spaghetti = T, nsamples = 200),
+     points = T,
+     point_args = c(alpha = 1/2, size = 1))
+
+```
+

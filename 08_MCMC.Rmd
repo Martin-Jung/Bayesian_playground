@@ -1,0 +1,77 @@
+---
+title: "MCMC"
+output: html_notebook
+---
+
+Lets start going through MCMC chains with rethinking
+
+```{r}
+library(rethinking)
+data(rugged)
+d <- rugged
+d$log_gdp <- log(d$rgdppc_2000)
+dd <- d[ complete.cases(d$rgdppc_2000) , ]
+
+# Refit model from chapter 7
+m8.1 <- map(
+  alist(
+    log_gdp ~ dnorm( mu , sigma ) ,
+    mu <- a + bR*rugged + bA*cont_africa + bAR*rugged*cont_africa ,
+    a ~ dnorm(0,100),
+    bR ~ dnorm(0,10),
+    bA ~ dnorm(0,10),
+    bAR ~ dnorm(0,10),
+    sigma ~ dunif(0,10)
+  ) ,
+data=dd )
+
+```
+
+For Hamiliton MCMC processing:
+
+- Do all data transformation beforehand
+- Use trimmed data frame of only the variables required
+
+```{r}
+dd.trim <- dd[ , c("log_gdp","rugged","cont_africa") ]
+
+m8.1stan <- map2stan(
+    alist(
+      log_gdp ~ dnorm( mu , sigma ) ,
+      mu <- a + bR*rugged + bA*cont_africa + bAR*rugged*cont_africa ,
+      a ~ dnorm(0,100),
+      bR ~ dnorm(0,10),
+      bA ~ dnorm(0,10),
+      bAR ~ dnorm(0,10),
+      sigma ~ dcauchy(0,2) # Note!
+    ) ,
+data=dd.trim )
+precis(m8.1stan)
+
+pairs(m8.1stan) # Pairs plot of estimated parameters
+plot(m8.1stan) # Trace plot
+
+# Here is how the stan code would look like
+stancode(m8.1stan)
+```
+
+How do the chains look when the predictors are highly correlated?
+
+```{r}
+y <- rnorm( 100 , mean=0 , sd=1 )
+
+m8.5 <- map2stan( 
+    alist(
+      y ~ dnorm( mu , sigma ) ,
+      mu <- a1 + a2 , # alpha 1 and 2 cannot be identified
+      a1 ~ dnorm( 0 , 10 ) ,
+      a2 ~ dnorm( 0 , 10 ) ,
+      sigma ~ dcauchy( 0 , 1 )
+    ) ,
+  data=list(y=y) , start=list(a1=0,a2=0,sigma=1) ,
+  chains=2 , iter=4000 , warmup=1000 )
+
+precis(m8.5) # Estimates well with flat priors
+
+```
+

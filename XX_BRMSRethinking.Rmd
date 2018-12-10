@@ -452,3 +452,36 @@ plot(marginal_effects(b6.14,
 
 ```
 
+#
+- Chapter 8 is pretty much self explanatory
+
+- Same with 9. Reading through examples there...
+But lets fit a distributional mode
+
+```{r}
+set.seed(100)
+(
+  d <-
+  tibble(x = rep(0:1, each = 100)) %>% 
+  mutate(y = rnorm(n = n(), mean = 100, sd = 10 + x * 10))
+  )
+
+
+d %>% 
+  mutate(x = x %>% as.character()) %>% 
+  ggplot(aes(x = y, y = x, fill = x)) +
+  geom_halfeyeh(point_interval = mean_qi, .width = .68) 
+# Both are identical in the mean but differ in the variation
+
+# In berms
+b9.1 <- 
+  brm(data = d, 
+      family = gaussian,
+      bf(y ~ 1, sigma ~ 1 + x), # Two formulas! One for mean, one for sigma
+      prior = c(prior(normal(100, 10), class = Intercept),
+                prior(normal(0, 10),   class = Intercept, dpar = sigma), # dpar for sigma
+                prior(normal(0, 10),   class = b,         dpar = sigma)))
+print(b9.1)
+
+```
+

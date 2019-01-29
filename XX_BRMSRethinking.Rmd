@@ -485,3 +485,249 @@ print(b9.1)
 
 ```
 
+# Chapter 10
+
+
+```{r Bionomial models}
+
+library(rethinking)
+data(chimpanzees)
+d <- chimpanzees
+library(brms);library(tidyverse)
+rm(chimpanzees)
+
+# Intercept only logistic model
+b10.1 <-brm(data = d, family = binomial,
+      pulled_left ~ 1,
+      prior(normal(0, 10), class = Intercept))
+
+# Get intercept only estimates and backtransform
+fixef(b10.1) %>% inv_logit_scaled() %>% round(digits = 2) 
+
+# Add a model with predictors and predisposition to pull left
+b10.2 <- brm(data = d, family = binomial,
+      pulled_left ~ 1 + prosoc_left,
+      prior = c(prior(normal(0, 10), class = Intercept), # Intercept
+                prior(normal(0, 10), class = b))) # Normal prior
+# Update the previous model with interaction based on condition
+b10.3 <- update(b10.2,
+         newdata = d,
+         formula = pulled_left ~ 1 + prosoc_left + condition:prosoc_left)
+
+# B10 should be the best model but with large uncertainty
+compare_ic(waic(b10.1),waic(b10.2),waic(b10.3) )
+# Look at the model weights
+model_weights(b10.1, b10.2, b10.3, weights = "waic")
+#-> still some considerable weight for b10.3
+
+# Model averaging
+# the combined `fitted()` results of the three models weighted by their WAICs
+pp_a <- pp_average(b10.1, b10.2, b10.3,
+             weights = "waic",
+             method = "fitted") %>%
+  as_tibble() %>% 
+  bind_cols(b10.3$data) %>% 
+  distinct(Estimate, Q2.5, Q97.5, condition, prosoc_left) %>% 
+  mutate(x_axis = str_c(prosoc_left, condition, sep = "/")) %>%
+  mutate(x_axis = factor(x_axis, levels = c("0/0", "1/0", "0/1", "1/1"))) %>% 
+  rename(pulled_left = Estimate)
+
+# the empirically-based summaries
+d_plot <-
+  d %>%
+  group_by(actor, condition, prosoc_left) %>%
+  summarise(pulled_left = mean(pulled_left)) %>%
+  mutate(x_axis = str_c(prosoc_left, condition, sep = "/")) %>%
+  mutate(x_axis = factor(x_axis, levels = c("0/0", "1/0", "0/1", "1/1")))
+
+# Compare
+pp_a %>% 
+  ggplot(aes(x = x_axis)) +
+  geom_ribbon(aes(ymin = Q2.5, 
+                  ymax = Q97.5,
+                  group = 0),fill="lightblue") +
+  geom_line(aes(y = pulled_left,
+                group = 0)) +
+  geom_line(data = d_plot,
+            aes(y = pulled_left, group = actor), size = 1/3) +
+  scale_x_discrete(expand = c(.03, .03)) +
+  coord_cartesian(ylim = 0:1) +
+  labs(x = "prosoc_left/condition",
+       y = "proportion pulled left") +
+  theme(axis.ticks.x = element_blank())
+
+# Sample from the posterior for model 3
+library(bayesplot)
+mcmc_pairs(x = posterior_samples(b10.3),
+           pars = c("b_Intercept", "b_prosoc_left", "b_prosoc_left:condition"),
+           off_diag_args = list(size = 1/10, alpha = 1/6),
+           diag_fun = "dens")
+# -> Posterior looks multivariate gaussian
+
+# New model that surpresses the default intercept and uses the for each actor
+b10.4 <-
+  brm(data = d, family = binomial,
+      pulled_left ~ 0 + factor(actor) + prosoc_left + condition:prosoc_left ,
+      prior(normal(0, 10), class = b), # All prior the same
+      iter = 2500, warmup = 500, chains = 2, cores = 2,
+      control = list(adapt_delta = 0.9))
+
+post <- posterior_samples(b10.4) # Sample posterior
+
+# Actor 2 intercept. 
+post %>% ggplot(aes(x = b_factoractor2)) + geom_density()
+
+# ---------- #
+# Aggregated binomial model
+d_aggregated <-
+  d %>%
+  select(-recipient, -block, -trial, -chose_prosoc) %>%
+  group_by(actor, condition, prosoc_left) %>%
+  summarise(x = sum(pulled_left))
+
+# Aggregated binomial model with the number of trial specified
+b10.5 <-
+  brm(data = d_aggregated, family = binomial,
+      x | trials(18) ~ 1 + prosoc_left + condition:prosoc_left ,
+      prior = c(prior(normal(0, 10), class = Intercept),
+                prior(normal(0, 10), class = b)),
+      iter = 2500, warmup = 500, cores = 2, chains = 2)
+# Should be identical to b10.3
+fixef(b10.3) %>% round(digits = 2)
+fixef(b10.5) %>% round(digits = 2)
+
+# --- #
+# Aggregated binomial for school admissions
+library(rethinking)
+data(UCBadmit)
+d <- UCBadmit
+detach(package:rethinking)
+library(brms)
+rm(UCBadmit)
+
+# Male dummy variable
+d <-  d %>% mutate(male = ifelse(applicant.gender == "male", 1, 0))
+
+# Does gender has an influence on the admission rate?
+b10.6 <-
+  brm(data = d, family = binomial,
+      admit | trials(applications) ~ 1 + male ,
+      prior = c(prior(normal(0, 10), class = Intercept),
+                prior(normal(0, 10), class = b)),
+      iter = 2500, warmup = 500, cores = 2, chains = 2)
+
+b10.7 <-
+  brm(data = d, family = binomial,
+      admit | trials(applications) ~ 1,
+      prior(normal(0, 10), class = Intercept),
+      iter = 2500, warmup = 500, cores = 2, chains = 2)
+
+waic(b10.6, b10.7)
+
+# The relative difference in admission odds
+fixef(b10.6)[2] %>% exp() %>%  round(digits = 2)
+
+# Difference in admission probabilities from the posterior
+post <- posterior_samples(b10.6)
+post %>%
+  mutate(p_admit_male   = inv_logit_scaled(b_Intercept + b_male),
+         p_admit_female = inv_logit_scaled(b_Intercept),
+         diff_admit     = p_admit_male - p_admit_female) %>%
+  summarise(`2.5%`  = quantile(diff_admit, probs = .025),
+            `50%`   = median(diff_admit),
+            `97.5%` = quantile(diff_admit, probs = .975))
+
+# Cases
+d <- d %>% mutate(case = factor(1:12))
+
+p_10.6 <-  predict(b10.6) %>%  as_tibble() %>% bind_cols(d)
+d_text <- d %>%  group_by(dept) %>%
+  summarise(case  = mean(as.numeric(case)),
+            admit = mean(admit / applications) + .05)
+
+# Now plot predicted admission difference
+ggplot(data = d, aes(x = case, y = admit / applications)) +
+  geom_pointrange(data = p_10.6, 
+                  aes(y    = Estimate / applications,
+                      ymin = Q2.5     / applications ,
+                      ymax = Q97.5    / applications),
+                  shape = 1, alpha = 1/3) +
+  geom_point(color = "red") +
+  geom_line(aes(group = dept),
+            color = "darkred") +
+  geom_text(data = d_text,
+            aes(y = admit, label = dept),
+            family = "serif") +
+  coord_cartesian(ylim = 0:1) +
+  labs(y     = "Proportion admitted",
+       title = "Posterior validation check") +
+  theme(axis.ticks.x = element_blank())
+
+
+
+#### LOO  and outlier detection ####
+# Leave out criterion
+library(loo)
+loo(b10.6)
+plot(lb10.6 <- loo(b10.6)) # Pareto K can be used to identify overly influential variables on fit
+pareto_k_ids(lb10.6, threshold = 1)
+lb10.6$diagnostics
+
+# For detecting outliers suing loo
+l_b10.6_reloo <- loo(b10.6, reloo = T)
+l_b10.7_reloo <- loo(b10.7, reloo = T)
+# Also see here
+# https://github.com/ASKurz/Student-s-t_regression
+
+
+# ---------------- #
+# Outliers indicate that the above is not really a good fit
+# New paradigm:
+# “What is the average difference in probability of admission between females and males within departments?
+
+b10.8 <-
+  brm(data = d, family = binomial,
+      admit | trials(applications) ~ 0 + dept, # No intercept, thus within. Department as beta
+      prior(normal(0, 10), class = b),
+      iter = 2500, warmup = 500, cores = 2, chains = 2)
+# Does gender explain differences?
+b10.9 <-update(b10.8,
+         newdata = d,
+         formula = admit | trials(applications) ~ 0 + dept + male)
+
+# Compare all models
+loos <- loo(b10.6, b10.7, b10.8, b10.9, 
+            reloo = T,
+            cores = 2)
+
+loos
+model_weights(b10.6, b10.7, b10.8, b10.9,weights = "loo")
+fixef(b10.9) %>% round(digits = 2)
+# For proportional odds the posterior mean is 
+fixef(b10.9)[7, 1] %>% exp()
+
+# New posterior checkes
+predict(b10.9) %>%
+  as_tibble() %>% 
+  bind_cols(d) %>% 
+  ggplot(data = ., aes(x = case, y = admit / applications)) +
+  geom_pointrange(data = p_10.6, 
+                  aes(y    = Estimate / applications,
+                      ymin = Q2.5     / applications ,
+                      ymax = Q97.5    / applications),
+                  shape = 1, alpha = 1/3) +
+  geom_point(color = "red") +
+  geom_line(aes(group = dept),
+            color = "darkred") +
+  geom_text(data = d_text,
+            aes(y = admit, label = dept),
+            family = "serif") +
+  coord_cartesian(ylim = 0:1) +
+  labs(y     = "Proportion admitted",
+       title = "Posterior validation check") +
+  theme(axis.ticks.x = element_blank())
+
+
+```
+
+

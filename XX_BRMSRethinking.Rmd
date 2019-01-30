@@ -731,3 +731,151 @@ predict(b10.9) %>%
 ```
 
 
+#### Poisson distributions and count data ####
+
+```{r Poisson}
+library(rethinking)
+data(Kline)
+d <- Kline
+detach(package:rethinking)
+library(brms);library(tidyverse)
+rm(Kline)
+
+# Log transform and create factor
+d <- d %>% mutate(log_pop      = log(population),
+                  contact_high = ifelse(contact == "high", 1, 0))
+
+b10.10 <-
+  brm(data = d, family = poisson,
+      total_tools ~ 1 + log_pop + contact_high + contact_high:log_pop,
+      prior = c(prior(normal(0, 100), class = Intercept),
+                prior(normal(0, 1), class = b)),
+      iter = 3000, warmup = 1000, chains = 4, cores = 4)
+
+# Posterior sample
+post <-  posterior_samples(b10.10)
+
+post %>% select(-lp__) %>% rename(b_interaction = `b_log_pop:contact_high`) %>% psych::lowerCor()
+library(bayesplot)
+post %>% select(-lp__) %>% rename(b_interaction = `b_log_pop:contact_high`) %>%
+  mcmc_intervals(prob = .5, prob_outer = .95) +
+  theme(axis.ticks.y = element_blank(),
+        axis.text.y  = element_text(hjust = 0))
+
+# How plausible is it a high-contact island will have more tools than a low-contact island?
+post <- post %>%
+  mutate(lambda_high = exp(b_Intercept + b_contact_high + (b_log_pop + `b_log_pop:contact_high`)*8), # Backtransform
+         lambda_low  = exp(b_Intercept + b_log_pop*8)) %>% 
+  mutate(diff        = lambda_high - lambda_low) 
+
+post %>%  summarise(sum = sum(diff > 0)/length(diff)) # 95.6 % of all counts
+post %>%
+  ggplot(aes(x = diff)) +
+  geom_density(fill="red",alpha =.6) +
+  geom_vline(xintercept = 0, linetype = 2) +
+    labs(x = "lambda_high - lambda_low")
+
+# ---- #
+
+# no interaction
+b10.11 <- 
+  update(b10.10, formula = total_tools ~ 1 + log_pop + contact_high)
+
+# no contact rate
+b10.12 <-
+  update(b10.10, formula = total_tools ~ 1 + log_pop)
+
+# no log-population
+b10.13 <-
+  update(b10.10, formula = total_tools ~ 1 + contact_high)
+
+# intercept only
+b10.14 <-
+  update(b10.10, formula = total_tools ~ 1)
+
+w_b10.10 <- waic(b10.10)
+w_b10.11 <- waic(b10.11)
+w_b10.12 <- waic(b10.12)
+w_b10.13 <- waic(b10.13)
+w_b10.14 <- waic(b10.14)
+
+compare_ic(w_b10.10, w_b10.11, w_b10.12, w_b10.13, w_b10.14)
+
+# Do an ensemble posterior prediction
+nd <-
+  tibble(log_pop      = seq(from = 6.5, to = 13, length.out = 50) %>% 
+           rep(., times = 2),
+         contact_high = rep(0:1, each = 50))
+
+ppa_10.9 <- 
+  pp_average(b10.10, b10.11, b10.12, # The 3 best models
+             weights = "loo", # Using loo
+             method  = "fitted",
+             newdata = nd) %>%
+  as_tibble() %>%
+  bind_cols(nd)
+
+# Plot
+ppa_10.9 %>%
+  ggplot(aes(x     = log_pop,
+             group = contact_high)) +
+  geom_ribbon(aes(ymin = Q2.5,
+                  ymax = Q97.5,
+                  fill = contact_high),
+              alpha = 1/4) +
+  geom_line(aes(y = Estimate, color = contact_high)) +
+  geom_text(data = d, 
+             aes(y     = total_tools,
+                 label = total_tools,
+                 color = contact_high),
+             size = 3.5) +
+  coord_cartesian(xlim = c(7.1, 12.4),
+                  ylim = c(12, 70)) +
+  labs(x = "log population",
+       y = "total tools",
+       subtitle = "Blue is the high contact rate; black is the low.") +
+  theme(legend.position = "none",
+        panel.border    = element_blank())
+
+# LOO weights
+model_weights(b10.10, b10.11, b10.12, 
+              weights = "loo")
+
+# ----- #
+# Lastly for exposure inclusion
+set.seed(3838)
+
+num_days  <- 30
+y         <- rpois(num_days, 1.5)
+num_weeks <- 4
+y_new     <- rpois(num_weeks, 0.5*7)
+d <- 
+tibble(y         = c(y, y_new), 
+       days      = c(rep(1, num_days), rep(7, num_weeks)),
+       monastery = c(rep(0, num_days), rep(1, num_weeks))) %>%
+mutate(log_days  = log(days))
+
+b10.15 <-
+  brm(data = d, family = poisson,
+      y ~ 1 + offset(log_days) + monastery, # Specify offset with log days
+      prior = c(prior(normal(0, 100), class = Intercept),
+                prior(normal(0, 1), class = b)),
+      iter = 2500, warmup = 500, cores = 2, chains = 2)
+
+library(tidybayes)
+
+posterior_samples(b10.15) %>%
+  transmute(lambda_old = exp(b_Intercept),
+            lambda_new = exp(b_Intercept + b_monastery)) %>%
+  gather() %>%
+  mutate(key = factor(key, levels = c("lambda_old", "lambda_new"))) %>%
+  group_by(key) %>%
+  mean_hdi(value, .width = .89) %>% 
+  mutate_if(is.double, round, digits = 2)
+
+# Leave it there ...
+
+
+```
+
+<br>

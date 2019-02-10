@@ -1,0 +1,104 @@
+---
+title: "Monsters and Mixtures"
+author: "Martin Jung"
+date: "7 February 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Chapter 11 - Monsters and mixtures
+
+
+Most people judge that, if Even pulls the lever, it is morally worse (less permissible) than
+when Dennis pulls the lever. Question is by how much:
+
+```{r}
+library(rethinking)
+data(Trolley)
+d <- Trolley
+
+simplehist( d$response , xlim=c(1,7) , xlab="response" )
+
+# discrete proportion of each response value
+pr_k <- table( d$response ) / nrow(d)
+# cumsum converts to cumulative proportions
+cum_pr_k <- cumsum( pr_k )
+# plot
+plot( 1:7 , cum_pr_k , type="b" , xlab="response" ,
+ylab="cumulative proportion" , ylim=c(0,1) )
+
+# Intercepts of each possible outcome alpha
+logit <- function(x) log(x/(1-x)) # convenience function 
+( lco <- logit( cum_pr_k ) )
+
+# Embeded link function in the fitting for map
+# (sure this is way easier using brms)
+m11.1 <- map(
+  alist(
+    response ~ dordlogit( phi , c(a1,a2,a3,a4,a5,a6) ),
+    phi <- 0,
+    c(a1,a2,a3,a4,a5,a6) ~ dnorm(0,10)
+    ) ,
+  data=d ,
+start=list(a1=-2,a2=-1,a3=0,a4=1,a5=2,a6=2.5) ) # start values just to start them in the right order
+
+precis(m11.1)
+logistic(coef(m11.1)) # Cumulative probabilities
+
+# With predictors
+m11.2 <- map(
+  alist(
+  response ~ dordlogit( phi , c(a1,a2,a3,a4,a5,a6) ) ,
+  phi <- bA*action + bI*intention + bC*contact,
+  c(bA,bI,bC) ~ dnorm(0,10),
+  c(a1,a2,a3,a4,a5,a6) ~ dnorm(0,10)
+  ) ,
+data=d ,
+start=list(a1=-1.9,a2=-1.2,a3=-0.7,a4=0.2,a5=0.9,a6=1.8) )
+
+precis(m11.2)
+
+# Same again but with interactions
+m11.3 <- map( 
+    alist(
+      response ~ dordlogit( phi , c(a1,a2,a3,a4,a5,a6) ) ,
+      phi <- bA*action + bI*intention + bC*contact +
+      bAI*action*intention + bCI*contact*intention ,
+      c(bA,bI,bC,bAI,bCI) ~ dnorm(0,10),
+      c(a1,a2,a3,a4,a5,a6) ~ dnorm(0,10)
+    ) ,
+    data=d ,
+  start=list(a1=-1.9,a2=-1.2,a3=-0.7,a4=0.2,a5=0.9,a6=1.8) )
+
+coeftab(m11.1,m11.2,m11.3)
+
+# Compare
+compare( m11.1 , m11.2 , m11.3 , refresh=0.1 ) # Model 3 is the best
+
+# Now plot all predictions
+post <- extract.samples( m11.3 ) # Posterior sample
+
+plot( 1 , 1 , type="n" , xlab="intention" , ylab="probability" , xlim=c(0,1) , ylim=c(0,1) , xaxp=c(0,1,1) , yaxp=c(0,1,2) )
+kA <- 0 # value for action 
+kC <- 1 # value for contact
+kI <- 0:1 # values of intention to calculate over
+for ( s in 1:100 ) {
+p <- post[s,]
+ak <- as.numeric(p[1:6])
+phi <- p$bA*kA + p$bI*kI + p$bC*kC +
+p$bAI*kA*kI + p$bCI*kC*kI
+pk <- pordlogit( 1:6 , a=ak , phi=phi ) # Ordered probabilities
+  for ( i in 1:6 )
+  lines( kI , pk[,i] , col=col.alpha(rangi2,0.1) )
+  }
+mtext( concat( "action=",kA,", contact=",kC ) )
+
+
+
+```
+
+
+

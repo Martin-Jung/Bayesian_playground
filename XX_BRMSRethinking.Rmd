@@ -879,3 +879,164 @@ posterior_samples(b10.15) %>%
 ```
 
 <br>
+
+# Monsters and mixture (models) with brms # - 
+
+```{r}
+library(rethinking)
+data(Trolley)
+d <- Trolley
+
+rm(Trolley)
+detach(package:rethinking, unload = T)
+library(brms)
+library(tidyverse)
+library(ggthemes)
+
+# Here are our starting values, which we specify with the `inits` argument in brm()
+inits <- list(`Intercept[1]` = -2,
+              `Intercept[2]` = -1,
+              `Intercept[3]` = 0,
+              `Intercept[4]` = 1,
+              `Intercept[5]` = 2,
+              `Intercept[6]` = 2.5)
+
+inits_list <- list(inits, inits)
+
+b11.1 <- 
+  brm(data = d, family = cumulative,
+      response ~ 1,
+      prior(normal(0, 10), class = Intercept),
+      iter = 2000, warmup = 1000, cores = 2, chains = 2,
+      inits = inits_list)  # Here we add our start values
+print(b11.1)
+
+# Get probability metrics
+posterior_samples(b11.1) %>% 
+  select(starts_with("b_")) %>% # those with an intercept
+  mutate_all(inv_logit_scaled) %>%  # inv_log trasnform
+  gather() %>% 
+  group_by(key) %>% 
+  summarise(mean = mean(value),
+            sd   = sd(value),
+            ll   = quantile(value, probs = .025), # lower limit
+            ul   = quantile(value, probs = .975)) # upper limit
+
+
+# Ordered logistic
+# First, we needed to specify the `logistic()` function, which is apart of the `dordlogit()` function
+logistic <- function(x) {
+    p <- 1 / (1 + exp(-x))
+    p <- ifelse(x == Inf, 1, p)
+    p
+    }
+
+# Function from McElreath book
+dordlogit <- 
+  function(x, phi, a, log = FALSE) {
+    a  <- c(as.numeric(a), Inf)
+    p  <- logistic(a[x] - phi)
+    na <- c(-Inf, a)
+    np <- logistic(na[x] - phi)
+    p  <- p - np
+    if (log == TRUE) p <- log(p)
+    p
+    }
+
+# --- #
+# Lets fit the model
+# Start values for b11.2
+inits <- list(`Intercept[1]` = -1.9,
+              `Intercept[2]` = -1.2,
+              `Intercept[3]` = -0.7,
+              `Intercept[4]` =  0.2,
+              `Intercept[5]` =  0.9,
+              `Intercept[6]` =  1.8,
+              action         =  0,
+              intention      =  0,
+              contact        =  0)
+
+b11.2 <- 
+  brm(data = d, family = cumulative,
+      response ~ 1 + action + intention + contact,
+      prior = c(prior(normal(0, 10), class = Intercept),
+                prior(normal(0, 10), class = b)),
+      iter = 2000, warmup = 1000, cores = 2, chains = 2,
+      inits = list(inits, inits))
+
+# Now with interaction
+# Start values for b11.3
+inits <- list(`Intercept[1]`      = -1.9,
+              `Intercept[2]`      = -1.2,
+              `Intercept[3]`      = -0.7,
+              `Intercept[4]`      =  0.2,
+              `Intercept[5]`      =  0.9,
+              `Intercept[6]`      =  1.8,
+              action              =  0,
+              intention           =  0,
+              contact             =  0,
+              `action:intention`  =  0,
+              `contact:intention` =  0)
+
+b11.3 <- 
+  update(b11.2,
+         formula = response ~ 1 + action + intention + contact + action:intention + contact:intention,
+         inits = list(inits, inits))
+
+library(broom)
+tidy(b11.1) %>% mutate(model = "b11.1") %>% 
+  bind_rows(tidy(b11.2) %>% mutate(model = "b11.2")) %>% 
+  bind_rows(tidy(b11.3) %>% mutate(model = "b11.3")) %>% 
+  select(model, term, estimate) %>% 
+  filter(term != "lp__") %>% 
+  complete(term = distinct(., term), model) %>% 
+  mutate(estimate = round(estimate, digits = 2)) %>%
+  spread(key = model, value = estimate) %>% 
+  # this last step isn't necessary, but it orders the rows to match the text
+  slice(c(6:11, 1, 4, 3, 2, 5))
+
+# WAIC comparison
+waic(b11.1, b11.2, b11.3) 
+
+
+```
+
+
+# The zero inflated things
+
+```{r}
+library(tidyverse)
+# define parameters
+prob_drink <- 0.2  # 20% of days
+rate_work  <- 1    # average 1 manuscript per day
+
+# sample one year of production
+N <- 365
+
+# simulate days monks drink
+set.seed(0.2)
+drink <- rbinom(N, 1, prob_drink)
+
+# simulate manuscripts completed
+y <- (1 - drink) * rpois(N, rate_work)
+
+d <-
+  tibble(Y = y) %>%
+  arrange(Y) %>% 
+  mutate(zeros = c(rep("zeros_drink", times = sum(drink)),
+                   rep("zeros_work",  times = sum(y == 0 & drink == 0)),
+                   rep("none",        times = N - sum(y == 0))
+                   )) 
+# Fit
+library(brms)
+b11.4 <- 
+  brm(data = d, family = zero_inflated_poisson,
+      Y ~ 1,
+      prior = c(prior(normal(0, 10), class = Intercept),
+                prior(beta(2, 2), class = zi)),  # the brms default is beta(1, 1)
+      cores = 4)
+
+print(b11.4)
+
+```
+

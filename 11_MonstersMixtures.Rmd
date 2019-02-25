@@ -101,4 +101,73 @@ mtext( concat( "action=",kA,", contact=",kC ) )
 ```
 
 
+# Zero inflated outcomes
+
+
+```{r Monks drinking behaviour}
+library(rethinking)
+# define parameters 
+prob_drink <- 0.2 # 20% of days
+rate_work <- 1 # average 1 manuscript per day
+
+# sample one year of production
+N <- 365
+# simulate days monks drink
+drink <- rbinom( N , 1 , prob_drink )
+# simulate manuscripts completed
+y <- (1-drink)*rpois( N , rate_work )
+
+simplehist( y , xlab="manuscripts completed" , lwd=4 )
+zeros_drink <- sum(drink)
+zeros_work <- sum(y==0 & drink==0)
+zeros_total <- sum(y==0)
+lines( c(0,0) , c(zeros_work,zeros_total) , lwd=4 , col=rangi2 )
+
+# Zero-inflated poisson distribution
+m11.4 <- map(
+    alist(
+      y ~ dzipois( p , lambda ),
+      logit(p) <- ap,
+      log(lambda) <- al,
+      ap ~ dnorm(0,1),
+      al ~ dnorm(0,10)
+    ),
+  data=list(y=y) )
+precis(m11.4)
+
+# probability drinking
+logistic(-1.39) 
+exp(0.05) # rate finish manuscripts, when not drinking
+
+
+```
+
+# Overdispersed Outcomes
+
+```{r Admissions with beta-binomial}
+library(rethinking)
+data(UCBadmit)
+d <- UCBadmit
+
+m11.5 <- map2stan(
+    alist(
+      admit ~ dbetabinom(applications,pbar,theta),
+      logit(pbar) <- a,
+      a ~ dnorm(0,2),
+      theta ~ dexp(1)
+    ),
+  data=d,
+  constraints=list(theta="lower=0"), # Constrains so that theta is strict positive
+  start=list(theta=3),
+iter=4000 , warmup=1000 , chains=2 , cores=2 )
+
+# Implied average admission across departments
+post <- extract.samples(m11.5)
+quantile( logistic(post$a) , c(0.025,0.5,0.975) )
+
+# Posterior validation check
+postcheck(m11.5) # predicted and observed proportion admitted
+
+```
+
 

@@ -73,3 +73,116 @@ dens( logistic(sim_tanks) , xlab="probability survive" )
 
 ```
 
+
+# Varying effects
+
+To illustrate some partial and complete pooling, we will simulate some frog pond data
+
+```{r}
+library(rethinking)
+a <- 1.4 # intercept
+sigma <- 1.5 # variation
+nponds <- 60 # 60 ponds
+ni <- as.integer( rep( c(5,10,25,35) , each=15 ) ) # Density 5-10-25 per pond
+
+# Simulate from the given gaussian
+a_pond <- rnorm( nponds , mean=a , sd=sigma )
+dsim <- data.frame( pond=1:nponds , ni=ni , true_a=a_pond )
+
+# Simulate survives using binomial coin flip
+dsim$si <- rbinom( nponds , prob=logistic(dsim$true_a) , size=dsim$ni )
+
+# Calculate proportion of survivers per pond
+dsim$p_nopool <- dsim$si / dsim$ni
+
+# Calculate partial pooling estimates
+m12.3 <- map2stan(
+    alist(
+      si ~ dbinom( ni , p ),
+      logit(p) <- a_pond[pond],
+      a_pond[pond] ~ dnorm( a , sigma ),
+      a ~ dnorm(0,1),
+      sigma ~ dcauchy(0,1)
+    ),
+    data=dsim , iter=1e4 , warmup=1000 )
+
+precis(m12.3,depth=2)
+# Calculate predicted survivers
+estimated.a_pond <- as.numeric( coef(m12.3)[1:60] )
+dsim$p_partpool <- logistic( estimated.a_pond )
+dsim$p_true <- logistic( dsim$true_a ) # Convert logistic
+
+# Calculate absolute errors
+nopool_error <- abs( dsim$p_nopool - dsim$p_true )
+partpool_error <- abs( dsim$p_partpool - dsim$p_true )
+
+# Error distribution
+plot( 1:60 , nopool_error , xlab="pond" , ylab="absolute error" ,
+    col=rangi2 , pch=16 )
+points( 1:60 , partpool_error )
+
+
+```
+
+# More than one type of cluster
+
+Create a varying intercept model from the chimapzee data
+
+```{r}
+library(rethinking)
+y1 <- rnorm( 1e4 , 10 , 1 )
+y2 <- 10 + rnorm( 1e4 , 0 , 1 )
+
+data(chimpanzees)
+d <- chimpanzees
+d$recipient <- NULL # get rid of NAs
+
+m12.4 <- map2stan(
+  alist(
+    pulled_left ~ dbinom( 1 , p ) ,
+    logit(p) <- a + a_actor[actor] + (bp + bpC*condition)*prosoc_left ,
+    a_actor[actor] ~ dnorm( 0 , sigma_actor ),
+    a ~ dnorm(0,10),
+    bp ~ dnorm(0,10),
+    bpC ~ dnorm(0,10),
+    sigma_actor ~ dcauchy(0,1)
+  ) ,
+data=d , warmup=1000 , iter=5000 , chains=4 , cores=3 )
+
+# Varying intercepts are just deviations from the overall intercept (a)
+post <- extract.samples(m12.4)
+total_a_actor <- sapply( 1:7 , function(actor) post$a + post$a_actor[,actor] ) # Just add them
+round( apply(total_a_actor,2,mean) , 2 )
+
+# Add block intercept
+# prep data 
+d$block_id <- d$block # name 'block' is reserved by Stan
+
+m12.5 <- map2stan(
+  alist(
+    pulled_left ~ dbinom( 1 , p ),
+    logit(p) <- a + a_actor[actor] + a_block[block_id] +
+    (bp + bpc*condition)*prosoc_left,
+    a_actor[actor] ~ dnorm( 0 , sigma_actor ),
+    a_block[block_id] ~ dnorm( 0 , sigma_block ),
+    c(a,bp,bpc) ~ dnorm(0,10),
+    sigma_actor ~ dcauchy(0,1),
+    sigma_block ~ dcauchy(0,1)
+  ) ,
+data=d, warmup=1000 , iter=6000 , chains=4 , cores=3 )
+
+precis(m12.5,depth=2) # depth=2 displays varying effects
+plot(precis(m12.5,depth=2)) # also plot
+
+# And plot variance
+post <- extract.samples(m12.5)
+dens( post$sigma_block , xlab="sigma" , xlim=c(0,4) )
+dens( post$sigma_actor , col=rangi2 , lwd=2 , add=TRUE )
+text( 2 , 0.85 , "actor" , col=rangi2 )
+text( 0.75 , 2 , "block" )
+
+#-> Model is confident that actors vary more than blocks
+compare(m12.4,m12.5)
+
+```
+

@@ -1040,3 +1040,93 @@ print(b11.4)
 
 ```
 
+#### MULTILEVEL MODELS ####
+
+This is the really important bit or rather the most useful bit for most analyses I do.
+
+```{r}
+library(rethinking)
+data(reedfrogs)
+d <- reedfrogs;rm(reedfrogs)
+detach(package:rethinking, unload = T)
+library(brms)
+library(tidyverse)
+
+# Make an id counter
+d <- d %>%  mutate(tank = 1:nrow(d))
+
+# Normal Model (pooled):
+b12.1 <- brm(data = d, family = binomial,
+      surv | trials(density) ~ 0 + factor(tank),
+      prior(normal(0, 5), class = b),
+      iter = 2000, warmup = 500, chains = 4, cores = 4)
+# Each tank gets its own intercept
+b12.2 <- brm(data = d, family = binomial,
+      surv | trials(density) ~ 1 + (1 | tank),
+      prior = c(prior(normal(0, 1), class = Intercept),
+                prior(cauchy(0, 1), class = sd)), # cauchy prior for varying intercept!
+      iter = 4000, warmup = 1000, chains = 4, cores = 4)
+
+waic(b12.1, b12.2)
+loo(b12.1, b12.2) # (or use kfold)
+
+# Sample from the posterior
+post <- posterior_samples(b12.2)
+
+postMdn <- coef(b12.2, robust = T)$tank[, , ] %>% 
+  as_tibble() %>% 
+  bind_cols(d) %>%
+  mutate(postMdn = inv_logit_scaled(Estimate))
+postMdn
+
+library(ggthemes) 
+postMdn %>%
+  ggplot(aes(x = tank, y = postMdn)) +
+  geom_hline(yintercept = inv_logit_scaled(median(post$b_Intercept)), linetype = 2, size = 1/4) +
+  geom_vline(xintercept = c(16.5, 32.5), size = 1/4) +
+  geom_point(aes(y = propsurv), color = "orange2") +
+  geom_point(shape = 1) +
+  coord_cartesian(ylim = c(0, 1)) +
+  scale_x_continuous(breaks = c(1, 16, 32, 48)) +
+  labs(title    = "Multilevel shrinkage!",
+       subtitle = "The empirical proportions are in orange while the model-\nimplied proportions are the black circles. The dashed line is\nthe model-implied average survival proportion.") +
+  annotate("text", x = c(8, 16 + 8, 32 + 8), y = 0, 
+           label = c("small tanks", "medium tanks", "large tanks")) +
+  theme_fivethirtyeight() +
+  theme(panel.grid = element_blank())
+
+# Also plot the distribution of all estimates
+tibble(x = c(-4, 5)) %>%
+  ggplot(aes(x = x)) +
+  mapply(function(mean, sd) {
+    stat_function(fun   = dnorm, 
+                  args  = list(mean = mean, sd = sd), 
+                  alpha = .2, 
+                  color = "orange2")
+    }, 
+    # Enter means and standard deviations here
+    mean = post[1:100, 1],
+    sd   = post[1:100, 2]
+    ) +
+  labs(title = "Population survival distribution",
+       subtitle = "The Gaussians are on the log-odds scale.") +
+  scale_y_continuous(NULL, breaks = NULL) +
+  coord_cartesian(xlim = c(-3, 4)) + 
+  theme_fivethirtyeight() +
+  theme(plot.title    = element_text(size = 13),
+        plot.subtitle = element_text(size = 10))
+
+# Probability of survival
+ggplot(data = post, 
+       aes(x = rnorm(n    = nrow(post), 
+                     mean = post[, 1], 
+                     sd   = post[, 2]) %>% 
+             inv_logit_scaled())) +
+  geom_density(size = 0, fill = "orange2") +
+  labs(title = "Probability of survival") +
+  scale_y_continuous(NULL, breaks = NULL) +
+  theme_fivethirtyeight()
+
+# Stop here(Prior for variance components)
+
+```

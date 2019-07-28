@@ -1,0 +1,291 @@
+---
+title: "Adventures in covariance"
+output: html_notebook
+---
+
+Explorative covariance analysis
+
+How to pool information across intercepts and slopes? By modeling the joint population of intercepts and slopes, which means by modeling their covariance.
+
+```{r}
+library(rethinking)
+a <- 3.5 # average morning wait time
+b <- (-1) # average difference afternoon wait time
+sigma_a <- 1 # std dev in intercepts
+sigma_b <- 0.5 # std dev in slopes
+rho <- (-0.7) # correlation between intercepts and slopes
+
+Mu <- c( a , b ) # Take the means 
+
+# Construct co-variance matrix
+cov_ab <- sigma_a*sigma_b*rho
+Sigma <- matrix( c(sigma_a^2,cov_ab,cov_ab,sigma_b^2) , ncol=2 )
+
+sigmas <- c(sigma_a,sigma_b) # standard deviations
+Rho <- matrix( c(1,rho,rho,1) , nrow=2 ) # correlation matrix
+# now matrix multiply to get covariance matrix
+Sigma <- diag(sigmas) %*% Rho %*% diag(sigmas)
+
+# Now sample randomly 20 cafes
+N_cafes <- 20
+
+library(MASS)
+set.seed(5) # used to replicate example
+vary_effects <- mvrnorm( N_cafes , Mu , Sigma )
+
+a_cafe <- vary_effects[,1]
+b_cafe <- vary_effects[,2]
+
+plot( a_cafe , b_cafe ,xlab="intercepts (a_cafe)" , ylab="slopes (b_cafe)" )
+# overlay population distribution
+library(ellipse)
+for ( l in c(0.1,0.3,0.5,0.8,0.99) ) lines(ellipse(Sigma,centre=Mu,level=l),col=col.alpha("black",0.2))
+
+# Simulate the visiting robots
+N_visits <- 10
+afternoon <- rep(0:1,N_visits*N_cafes/2)
+cafe_id <- rep( 1:N_cafes , each=N_visits )
+
+mu <- a_cafe[cafe_id] + b_cafe[cafe_id]*afternoon
+sigma <- 0.5 # std dev within cafes
+wait <- rnorm( N_visits*N_cafes , mu , sigma )
+d <- data.frame( cafe=cafe_id , afternoon=afternoon , wait=wait )
+
+R <- rlkjcorr( 1e4 , K=2 , eta=2 )
+
+m13.1 <- map2stan(
+  alist(
+  wait ~ dnorm( mu , sigma ),
+  mu <- a_cafe[cafe] + b_cafe[cafe]*afternoon,
+  # The distribution dmvnorm2 is a multivariate Gaussian notation that takes a vector of means,
+  # c(a,b), a vector of standard deviations, sigma_cafe, and a correlation matrix, Rho.
+  c(a_cafe,b_cafe)[cafe] ~ dmvnorm2(c(a,b),sigma_cafe,Rho),
+  a ~ dnorm(0,10),
+  b ~ dnorm(0,10),
+  sigma_cafe ~ dcauchy(0,2),
+  sigma ~ dcauchy(0,2),
+  Rho ~ dlkjcorr(2)
+  ) ,
+  data=d ,
+iter=5000 , warmup=2000 , chains=2 )
+
+post <- extract.samples(m13.1)
+dens( post$Rho[,1,2] )
+
+```
+
+All together, the variances and correlation define an inferred
+multivariate Gaussian prior for the varying effects. And this prior, learned from the
+data, adaptively regularizes both the intercepts and slopes.
+
+```{r}
+# compute unpooled estimates directly from data
+a1 <- sapply( 1:N_cafes ,function(i) mean(wait[cafe_id==i & afternoon==0]) )
+b1 <- sapply( 1:N_cafes ,function(i) mean(wait[cafe_id==i & afternoon==1]) ) - a1
+
+# extract posterior means of partially pooled estimates
+post <- extract.samples(m13.1)
+a2 <- apply( post$a_cafe , 2 , mean )
+b2 <- apply( post$b_cafe , 2 , mean )
+
+# plot both and connect with lines
+plot( a1 , b1 , xlab="intercept" , ylab="slope", pch=16 , col=rangi2 , ylim=c( min(b1)-0.1 , max(b1)+0.1 ),
+      xlim=c( min(a1)-0.1, max(a1)+0.1 ) )
+points( a2 , b2 , pch=1 )
+for ( i in 1:N_cafes ) lines( c(a1[i],a2[i]) , c(b1[i],b2[i]) )
+
+# The greater the arrow, the more shrinkage, as in the result being less plausible
+
+```
+
+```{r Varying slopes for the admission data}
+library(rethinking)
+options(mc.cores = parallel::detectCores())
+data(UCBadmit)
+d <- UCBadmit
+d$male <- ifelse( d$applicant.gender=="male" , 1 , 0 )
+d$dept_id <- coerce_index( d$dept )
+
+m13.2 <- map2stan( 
+  alist(
+    admit ~ dbinom( applications , p ),
+    logit(p) <- a_dept[dept_id] + bm*male,
+    a_dept[dept_id] ~ dnorm( a , sigma_dept ),
+    a ~ dnorm(0,10),
+    bm ~ dnorm(0,1),
+    sigma_dept ~ dcauchy(0,2)
+  ) ,
+  data=d , warmup=500 , iter=4500 , chains=3 )
+precis( m13.2 , depth=2 )
+
+# Now include joint to include varying slopes
+m13.3 <- map2stan(
+  alist(
+    admit ~ dbinom( applications , p ),
+    logit(p) <- a_dept[dept_id] +
+    bm_dept[dept_id]*male,
+    c(a_dept,bm_dept)[dept_id] ~ dmvnorm2( c(a,bm) , sigma_dept , Rho ),
+    a ~ dnorm(0,10),
+    bm ~ dnorm(0,1),
+    sigma_dept ~ dcauchy(0,2),
+    Rho ~ dlkjcorr(2)
+  ) ,
+data=d , warmup=1000 , iter=5000 , chains=4 , cores=3 )
+
+# Models 13.3 being the best, yet having an average slope of zero
+
+# And ignoring gender
+m13.4 <- map2stan(
+  alist(
+    admit ~ dbinom( applications , p ),
+    logit(p) <- a_dept[dept_id],
+    a_dept[dept_id] ~ dnorm( a , sigma_dept ),
+    a ~ dnorm(0,10),
+    sigma_dept ~ dcauchy(0,2)
+  ) ,
+  data=d , warmup=500 , iter=4500 , chains=3 )
+
+compare( m13.2 , m13.3 , m13.4 )
+
+
+```
+The average isn’t what matters, however. It is the individual slopes, one for each department,
+that matter. If we wish to generalize to new departments, the variation in slopes suggests
+that it’ll be worth paying attention to gender, even if the average slope is nearly zero in the
+population.
+
+# 
+
+```{r Cross-classified chimpanzees with varying slopes}
+
+# Non-centered and centered parametrization
+
+library(rethinking)
+data(chimpanzees)
+d <- chimpanzees
+d$recipient <- NULL
+d$block_id <- d$block
+
+m13.6 <- map2stan(
+  alist(
+    # likeliood
+    pulled_left ~ dbinom(1,p),
+    # linear models
+    logit(p) <- A + (BP + BPC*condition)*prosoc_left,
+    A <- a + a_actor[actor] + a_block[block_id],
+    BP <- bp + bp_actor[actor] + bp_block[block_id],
+    BPC <- bpc + bpc_actor[actor] + bpc_block[block_id],
+    # adaptive priors
+    c(a_actor,bp_actor,bpc_actor)[actor] ~  dmvnorm2(0,sigma_actor,Rho_actor),
+    c(a_block,bp_block,bpc_block)[block_id] ~ dmvnorm2(0,sigma_block,Rho_block),
+    # fixed priors
+    c(a,bp,bpc) ~ dnorm(0,1),
+    sigma_actor ~ dcauchy(0,2),
+    sigma_block ~ dcauchy(0,2),
+    Rho_actor ~ dlkjcorr(4),
+    Rho_block ~ dlkjcorr(4)
+) , data=d , iter=5000 , warmup=1000 , chains=3 , cores=3 )
+
+# Non-centered
+m13.6NC <- map2stan(
+  alist(
+    pulled_left ~ dbinom(1,p),
+    logit(p) <- A + (BP + BPC*condition)*prosoc_left,
+    A <- a + a_actor[actor] + a_block[block_id],
+    BP <- bp + bp_actor[actor] + bp_block[block_id],
+    BPC <- bpc + bpc_actor[actor] + bpc_block[block_id],
+    # adaptive NON-CENTERED priors
+    c(a_actor,bp_actor,bpc_actor)[actor] ~  dmvnormNC(sigma_actor,Rho_actor),
+    c(a_block,bp_block,bpc_block)[block_id] ~  dmvnormNC(sigma_block,Rho_block),
+    c(a,bp,bpc) ~ dnorm(0,1),
+    sigma_actor ~ dcauchy(0,2),
+    sigma_block ~ dcauchy(0,2),
+    Rho_actor ~ dlkjcorr(4),
+    Rho_block ~ dlkjcorr(4)
+  ),
+data=d , iter=5000 , warmup=1000 , chains=3 , cores=3 )
+
+# Non-centered samples much more efficiently. No convergence errors
+#The non-centered version of the model samples much more efficiently, producing more effective samples per parameter. In practice, this means you don’t need as many actual iterations, iter, to arrive at an equally good portrait of the posterior distribution. For larger data sets, the savings can mean hours of time.
+# TDOO: Find out how this can be implemented in brms notation
+
+```
+In the end, you might simplify your life by reducing the model down to only vary the
+slopes with important variation. In this case, effective inference doesn’t depend upon including
+varying effects on block at all.
+
+# Gaussian processes (regression) ! #
+
+```{r}
+library(rethinking)
+data(islandsDistMatrix)
+
+# display short column names, so fits on screen
+Dmat <- islandsDistMatrix
+colnames(Dmat) <- c("Ml","Ti","SC","Ya","Fi","Tr","Ch","Mn","To","Ha")
+round(Dmat,1)
+
+data(Kline2)
+d <- Kline2
+d$society <- 1:10 # index observations
+
+m13.7 <- map2stan(
+  alist(
+    total_tools ~ dpois(lambda),
+    log(lambda) <- a + g[society] + bp*logpop,
+    g[society] ~ GPL2( Dmat , etasq , rhosq , 0.01 ),
+    a ~ dnorm(0,10),
+    bp ~ dnorm(0,1),
+    etasq ~ dcauchy(0,1),
+    rhosq ~ dcauchy(0,1)
+    ),
+  data=list(
+  total_tools=d$total_tools,
+  logpop=d$logpop,
+  society=d$society,
+  Dmat=islandsDistMatrix),
+warmup=2000 , iter=1e4 , chains=4 )
+
+# Get a sense of the distribution of the values by sampling a few of them
+post <- extract.samples(m13.7)
+
+#plot the posterior median covariance function
+curve( median(post$etasq)*exp(-median(post$rhosq)*x^2) , from=0 , to=10 ,xlab="distance (thousand km)" , ylab="covariance" ,
+       ylim=c(0,1) ,
+       yaxp=c(0,1,4) , lwd=2 )
+
+# plot 100 functions sampled from posterior
+for ( i in 1:100 ) curve( post$etasq[i]*exp(-post$rhosq[i]*x^2) , add=TRUE ,col=col.alpha("black",0.2) )
+
+# hard to interpret, therefore transform
+# compute posterior median covariance among societies 13.34
+K <- matrix(0,nrow=10,ncol=10)
+for ( i in 1:10 ) for ( j in 1:10 ) K[i,j] <- median(post$etasq) * exp( -median(post$rhosq) * islandsDistMatrix[i,j]^2 )
+
+diag(K) <- median(post$etasq) + 0.01
+
+# convert to correlation matrix
+Rho <- round( cov2cor(K) , 2 )
+# add row/col names for convenience
+colnames(Rho) <- c("Ml","Ti","SC","Ya","Fi","Tr","Ch","Mn","To","Ha")
+rownames(Rho) <- colnames(Rho)
+Rho
+
+# scale point size to logpop
+psize <- d$logpop / max(d$logpop)
+psize <- exp(psize*1.5)-2
+# plot raw data and labels
+plot( d$lon2 , d$lat , xlab="longitude" , ylab="latitude",col=rangi2 , cex=psize , pch=16 , xlim=c(-50,30) )
+labels <- as.character(d$culture)
+text( d$lon2 , d$lat , labels=labels , cex=0.7 , pos=c(2,4,3,3,4,1,3,2,4,2) )
+
+# overlay lines shaded by Rho
+for( i in 1:10 ) for ( j in 1:10 ) {
+  if ( i < j )
+  lines( c( d$lon2[i],d$lon2[j] ) , c( d$lat[i],d$lat[j] ) ,
+  lwd=2 , col=col.alpha("black",Rho[i,j]^2) )
+}
+
+```
+
+

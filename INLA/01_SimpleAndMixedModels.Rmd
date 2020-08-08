@@ -1,0 +1,152 @@
+---
+title: "INLA tutorials"
+output: html_notebook
+---
+
+Working through the online [INLA book](https://becarioprecario.bitbucket.io/inla-gitbook) and examples.
+
+# Load necessary packages
+
+```{r, echo=FALSE,eval=FALSE}
+library(INLA)
+#inla.pardiso() # PARADISO solver https://pardiso-project.org
+library(tidyverse)
+library(bayesplot)
+library(ggplot2)
+library("MASS")
+library(broom)
+```
+
+# Integrated Nested Laplace Approximation (INLA)
+'Havard Rue, Martino, and Chopin (2009) propose a novel approach that makes Bayesian inference faster. First of all, rather than aiming at estimating the joint posterior distribution of the model parameters, they suggest focusing on individual posterior marginals of the model parameters. In many cases, marginal inference is enough to make inference of the model parameters and latent effects, and there is no need to deal with multivariate posterior distributions that are difficult to obtain.'
+
+# Multiple linear regression with INLA
+
+```{r}
+
+m1 <- inla(y ~ x1 + x2 + x3 + x4, data = cement)
+plot(m1)
+summary(m1)
+
+# Other likelihoods available
+names(inla.models()$likelihood)
+
+# Poisson regression
+library("spdep")
+data(nc.sids)
+    
+# Overall rate
+r <- sum(nc.sids$SID74) / sum(nc.sids$BIR74)
+
+# Expected SIDS per county
+nc.sids$EXP74 <- r * nc.sids$BIR74
+
+# Proportion of non-white births
+nc.sids$NWPROP74 <- nc.sids$NWBIR74 / nc.sids$BIR74
+
+# Model
+m.pois <- inla(SID74 ~ NWPROP74, data = nc.sids, family = "poisson",
+  E = EXP74)
+
+summary(m.pois)
+
+# Add a gaussian distributed random effects to the model
+m.poisover <- inla(SID74 ~ NWPROP74 + f(CNTY.ID, model = "iid"),
+  data = nc.sids, family = "poisson", E = EXP74)
+
+summary(m.poisover)
+
+# Add index for latent effect
+nc.sids$idx <- 1:nrow(nc.sids)
+# Model fitting
+m.poisover <- inla(SID74 ~ NWPROP74 + f(idx, model = "iid"),    
+  data = nc.sids, family = "poisson", E = EXP74)
+summary(m.poisover)
+
+# CPO: For each observation CPO is the posterior probability of observing that observation when the model is fit using all data but y_i.
+
+# PIT:  predictive integral transform (PIT) which measures, for each observation, the probability of a new value to be lower than the actual observed value:
+
+# DIC & WAIC: Take into account goodness-of-fit and a penalty term that is based on the complexity of the model via the estimated effective number of parameters.
+
+# Now calculate with model selection
+# Poisson model
+m.pois <- inla(SID74 ~ NWPROP74, data = nc.sids, family = "poisson",
+  E = EXP74, control.compute = list(cpo = TRUE, dic = TRUE, waic = TRUE))
+
+# Poisson model with iid random effects
+m.poisover <- inla(SID74 ~ NWPROP74 + f(CNTY.ID, model = "iid"),
+  data = nc.sids, family = "poisson", E = EXP74,
+  control.compute = list(cpo = TRUE, dic = TRUE, waic = TRUE))
+
+```
+
+
+Other Control options
+
+```{r}
+?control.compute
+
+library("ggplot2")
+library("gridExtra")
+
+# Posterior of coefficient of x1
+plot1 <- ggplot(as.data.frame(m1$marginals.fixed$x1)) + 
+  geom_line(aes(x = x, y = y)) +
+  ylab (expression(paste(pi, "(", "x", " | ", bold(y), ")")))
+
+# Posterior of precision
+plot2 <- ggplot(as.data.frame(m1$marginals.hyperpar[[1]])) + 
+  geom_line(aes(x = x, y = y)) +
+  ylab (expression(paste(pi, "(", tau, " | ", bold(y), ")")))
+
+grid.arrange(plot1, plot2, nrow = 2)
+
+#  the probability of its coefficient being higher than one can be computed:
+1 - inla.pmarginal(0, m1$marginals.fixed$x1)
+
+# 95% HPD interval
+inla.hpdmarginal(0.95, m1$marginals.hyperpar[[1]])
+
+# Posterior marginal
+marg.stdev <- inla.tmarginal(function(tau) tau^(-1/2), m1$marginals.hyperpar[[1]])
+inla.zmarginal(marg.stdev)
+# Posterior mean can also be computed like this
+inla.emarginal(function(sigma) sigma, marg.stdev)
+# Posterior mode of SD
+inla.mmarginal(marg.stdev)
+
+```
+
+## Sampling from the posterior
+
+```{r}
+
+# Fit model with config = TRUE
+m1 <- inla(y ~ x1 + x2 + x3 + x4, data = cement,
+  control.compute = list(config = TRUE)) # Option for posterior samling
+
+# Sample 100 times for variable x1 and x2
+m1.samp <- inla.posterior.sample(100, m1, selection = list(x1 = 1, x2 = 1))
+names(m1.samp[[1]])
+
+m1.samp[[1]]
+
+# Product of the two coefficients
+x1x2.samp <- inla.posterior.sample.eval(function(...) {x1 * x2},
+   m1.samp)
+
+summary(as.vector(x1x2.samp))
+
+# --- #
+# Or sample the hyper parameter
+# Sample hyperpars from joint posterior
+set.seed(123)
+  prec.samp <- inla.hyperpar.sample(1000, m1)
+
+
+```
+
+
+# Mixed effects models
+

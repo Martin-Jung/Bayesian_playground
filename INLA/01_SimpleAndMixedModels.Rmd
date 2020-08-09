@@ -22,6 +22,7 @@ library(broom)
 
 # Multiple linear regression with INLA
 
+
 ```{r}
 
 m1 <- inla(y ~ x1 + x2 + x3 + x4, data = cement)
@@ -149,4 +150,84 @@ set.seed(123)
 
 
 # Mixed effects models
+
+linear as simple linear fixed effect. clinear as constrained linear fixed effect, constrained as ranges of possible values can be fixed.
+
+```{r}
+library(INLA)
+library("spdep")
+data(nc.sids)
+
+# Overall rate
+r <- sum(nc.sids$SID74) / sum(nc.sids$BIR74)
+nc.sids$EXP74 <- r * nc.sids$BIR74
+
+# Proportion of non-white births
+nc.sids$NWPROP74 <- nc.sids$NWBIR74 / nc.sids$BIR74
+
+# With linear effect
+m.pois.lin1 <- inla(SID74 ~ f(NWPROP74, model = "linear"),
+  data = nc.sids, family = "poisson", E = EXP74)
+
+# Constrained range
+m.pois.clin1 <- inla(SID74 ~ f(NWPROP74, model = "clinear",
+  range = c(0, Inf)), data = nc.sids, family = "poisson",
+  E = EXP74)
+
+summary(m.pois.clin1)
+```
+
+Now for different types of random effects
+
+```{r}
+
+# iid 
+# Often used for overdispersion
+nc.sids$ID <- 1:100
+
+m.pois.iid <- inla(SID74 ~ f(ID, model = "iid"),
+  data = nc.sids, family = "poisson",
+  E = EXP74)
+
+summary(m.pois.iid)
+
+m.pois.iid2 <- inla(SID74 ~ NWPROP74 + f(ID, model = "iid"),
+  data = nc.sids, family = "poisson",
+  E = EXP74)
+
+summary(m.pois.iid2)
+
+# ---- #
+# Z latent model where z is is a defined matrix
+m.pois.z <- inla(SID74 ~ f(ID, model = "z", Z = Diagonal(nrow(nc.sids), 1)),
+  data = nc.sids, family = "poisson", E = EXP74)
+
+summary(m.pois.z)
+
+# Generic 0 random intercept
+# fixed matrix C that is completely known and does not depend on any other hyperparameter
+m.pois.g0 <- inla(SID74 ~ f(ID, model = "generic0", 
+  Cmatrix = Diagonal(nrow(nc.sids), 1)),
+  data = nc.sids, family = "poisson", E = EXP74)
+
+summary(m.pois.g0)
+
+# Generic 1 - matrix with separate entries for precision, known values and eigenvalues
+# Generic 2 ?
+# Generic 3
+
+K1 <- Diagonal(nrow(nc.sids), 1)
+
+m.pois.g2 <- inla(SID74 ~ f(ID, model = "generic3", Cmatrix = list(K1)),
+  data = nc.sids, family = "poisson", E = EXP74)
+
+summary(m.pois.g2)
+
+# ------ #
+# Correlated random effects
+
+
+
+
+```
 

@@ -218,16 +218,132 @@ summary(m.pois.g0)
 
 K1 <- Diagonal(nrow(nc.sids), 1)
 
-m.pois.g2 <- inla(SID74 ~ f(ID, model = "generic3", Cmatrix = list(K1)),
-  data = nc.sids, family = "poisson", E = EXP74)
+m.pois.g2 <- inla(SID74 ~ f(ID, model = "generic3", Cmatrix = list(K1)),data = nc.sids, family = "poisson", E = EXP74)
 
 summary(m.pois.g2)
 
 # ------ #
 # Correlated random effects
+# Named after number of dimensions of correlated random effects
+inla.doc("iid2d")
+
+#Overall rate
+r79 <- sum(nc.sids$SID79) / sum(nc.sids$BIR79)
+nc.sids$EXP79 <- r79 * nc.sids$BIR79
+
+#New data.frame
+nc.new <- data.frame(SID = c(nc.sids$SID74, nc.sids$SID79),
+  EXP = c(nc.sids$EXP74, nc.sids$EXP79),
+  PERIOD = as.factor(c(rep("74", 100), rep("79", 100))),
+  ID = 1:200)
+
+m.pois.iid2d <- inla(SID ~ 0 + PERIOD + f(ID, model = "iid2d", n = 2 * 100),
+  data = nc.new, family = "poisson", E = EXP)
+
+summary(m.pois.iid2d)
+
+# Random walks
+# Although this is a discrete latent effect, it can be used to model continuous variables by using the values argument. In particular, the values of the covariate can be binned so that they are associated with a particular value of the vector of random effects. This is particularly interesting to model non-linear dependence on covariates in the linear predictor.
+
+data(AirPassengers)
+
+airp.data <- data.frame(airp = as.vector(AirPassengers),
+  month = as.factor(rep(1:12, 12)), 
+  year = as.factor(rep(1949:1960, each = 12)),
+  ID = 1:length(AirPassengers))
+
+# RW1
+airp.rw1 <- inla(log(AirPassengers) ~ 0 + year + f(ID, model = "rw1"),
+  control.family = list(hyper = list(prec = list(param = c(1, 0.2)))),
+  data = airp.data, control.predictor = list(compute = TRUE))
+summary(airp.rw1)
+
+#RW2 (second order)
+airp.rw2 <- inla(log(AirPassengers) ~ 0 + year + f(ID, model = "rw2"),
+  control.family = list(hyper = list(prec = list(param = c(1, 0.2)))),
+  data = airp.data, control.predictor = list(compute = TRUE))
+summary(airp.rw2)
+
+# Seasonal random effects
+airp.seasonal <- inla(log(AirPassengers) ~ 0 + year +
+    f(ID, model = "seasonal", season.length = 12),
+  control.family = list(hyper = list(prec = list(param = c(1, 0.2)))),
+  data = airp.data)
+summary(airp.seasonal)
+
+# AR models
+# AR1
+airp.ar1 <- inla(log(AirPassengers) ~ 0 + year + f(ID, model = "ar1"),
+  control.family = list(hyper = list(prec = list(param = c(1, 0.2)))),
+  data = airp.data, control.predictor = list(compute = TRUE))
+summary(airp.ar1)
+
+# Third order AR
+airp.ar3 <- inla(log(AirPassengers) ~ 0 + year + f(ID, model = "ar",
+    order = 3), 
+  control.family = list(hyper = list(prec = list(param = c(1, 0.2)))),
+  data = airp.data, control.predictor = list(compute = TRUE))
+summary(airp.ar3)
+
+# ar1c for covariate lag effects!
+# in previous models covariate year has been included as part of the linear predictor. In the next model this covariate is included as part of an AR(1) model with covariates (i.e., a ar1c model):
+
+Z <- model.matrix (~ 0 + year, data = airp.data)
+Q.beta <- Diagonal(12, 0.001)
+
+airp.ar1c <- inla(log(AirPassengers) ~ 1 + f(ID, model = "ar1c",
+  args.ar1c = list(Z = Z, Q.beta = Q.beta)),
+  control.family = list(hyper = list(prec = list(param = c(1, 0.2)))),
+  data = airp.data, control.predictor = list(compute = TRUE))
+summary(airp.ar1c)
 
 
+```
+
+Additional hyper parameters that can be defined in f()
+<
+  hyper 	Default priors 	Definition of priors for hyperparameters.
+  constr 	FALSE 	Sum-to-zero constraint on the random effects.
+  extraconstr 	FALSE 	Additional constraint on the random effects.
+  scale.model 	FALSE 	Scale variance matrix of random effects.
+  group 	— 	Variable to define the groups of random effect.
+  control.group 	— 	Control options for group parameter.
+>
+
+```{r}
+# Different prior for one model, gaussian mean 0 and sigma 1/1000
+# More in priors later
+
+m.pois.iid.gp <- inla(SID74 ~ f(ID, model = "iid",
+    hyper = list(theta = list(prior = "gaussian", param = c(0, 0.001)))),
+  data = nc.sids, family = "poisson",
+  E = EXP74)
+
+# Sum to zero constrain on random effect
+m.pois.iid.gp0 <- inla(SID74 ~ f(ID, model = "iid", constr = TRUE),
+  data = nc.sids, family = "poisson", E = EXP74)
+
+summary(m.pois.iid.gp0)
+
+# With extra constrains
+n <- nrow(nc.sids)
+A <- matrix(1, ncol = n, nrow = 1)
+e <- rep(0, 1)
+m.pois.iid.extrac <- inla(SID74 ~ 
+    f(ID, model = "iid", extraconstr = list(A = A, e = e)),
+  data = nc.sids, family = "poisson", E = EXP74)
+
+# Grouped random effects
+airp.data$month.num <- as.numeric(airp.data$month)
+airp.data$year.num <- as.numeric(airp.data$year)
+airp.iid.ar1 <- inla(log(airp) ~ 0 +  f(year.num, model = "iid",
+    group = month.num, control.group = list(model = "ar1", 
+    scale.model = TRUE)),
+  data = airp.data)
+summary(airp.iid.ar1)
 
 
+# Other random effects
+inla.doc()
 ```
 

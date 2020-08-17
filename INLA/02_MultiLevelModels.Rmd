@@ -1,0 +1,136 @@
+---
+title: "Multilevel models"
+output: html_notebook
+---
+
+This notebook deals with multi-level models from Chapter 4. These will probably be the most heavily used types of model structure in future work on INLA.
+
+```{r}
+library(INLA)
+library("faraway")
+data(penicillin)
+summary(penicillin)
+
+## Random intercept model
+
+# Set prior on precision
+prec.prior <- list(prec = list(param = c(0.001, 0.001)))
+
+# Reset reference level
+penicillin$treat <- relevel(penicillin$treat, "D")
+
+inla.pen <- inla(yield ~ 1 + treat + f(blend, model = "iid",
+    hyper = prec.prior),
+  data = penicillin, control.predictor = list(compute = TRUE))
+
+# Comparison
+library("lme4")
+lmer.pen <- lmer(yield ~ 1 + treat + (1|blend), data = penicillin)
+
+summary(lmer.pen)
+summary(inla.pen)
+
+# Alternatively this model can also be fitted by manually specifying the random effects
+# Using a model matrix
+Z <- as(model.matrix(~ 0 + blend, data = penicillin), "Matrix")
+# Create index
+penicillin$ID <- 1:nrow(penicillin)
+# Refit
+inla.pen.z <- inla(yield ~ 1 + treat +  f(ID, model = "z", Z = Z,
+  hyper = list(prec = list(param = c(0.001, 0.001)))),
+  data = penicillin, control.predictor = list(compute = TRUE))
+summary(inla.pen.z)
+
+```
+
+## Multilevel models with nested effects
+
+```{r}
+data(eggs)
+
+Zlt <- as(model.matrix( ~ 0 + Lab:Technician, data = eggs), "Matrix")
+Zlts <- as(model.matrix( ~ 0 + Lab:Technician:Sample, data = eggs), "Matrix")
+
+# Index for techinician
+eggs$IDt <- 1:nrow(eggs)
+# Index for technician:sample
+eggs$IDts <- 1:nrow(eggs)
+
+inla.eggs <- inla(Fat ~ 1 + f(Lab, model = "iid", hyper = prec.prior) +
+    f(IDt, model = "z", Z = Zlt, hyper = prec.prior) +
+    f(IDts, model = "z", Z = Zlts, hyper = prec.prior),
+  data = eggs, control.predictor = list(compute = TRUE))
+
+summary(inla.eggs)
+
+# Alternative
+# Create index for iid
+eggs$labtech <- as.factor(apply(Zlt, 1, function(x){names(x)[x == 1]}))
+eggs$labtechsamp <- as.factor(apply(Zlts, 1, function(x){names(x)[x == 1]}))
+
+inla.eggs.iid <- inla(Fat ~ 1 + f(Lab, model = "iid", hyper = prec.prior) +
+    f(labtech, model = "iid", hyper = prec.prior) +
+    f(labtechsamp, model = "iid", hyper = prec.prior),
+  data = eggs, control.predictor = list(compute = TRUE))
+
+summary(inla.eggs.iid)
+
+```
+
+##  Multilevel models with complex structure
+
+```{r}
+# Get the testing data
+download.file('https://www.jstatsoft.org/index.php/jss/article/downloadSuppFile/v045i05/class_size_data.txt',destfile = 'class_size_data.txt')
+
+# Read data
+csize_data <- read.csv (file = "class_size_data.txt", header = FALSE,
+  sep = "", dec = ".")
+
+#Set names
+names(csize_data) <- c("clsnr", "pupil", "nlitpre", "nmatpre", "nlitpost",
+  "nmatpost", "csize")
+
+#Set NA's
+csize_data [csize_data < -1e+29 ] <- NA
+
+#Set class size levels
+csize_data$csize <- as.factor(csize_data$csize)
+levels(csize_data$csize) <- c("<=19", "20-24", "25-29", ">=30")
+
+summary(csize_data)
+
+# Ignore missing data
+csize_data2 <- na.omit(csize_data[, -5])
+
+# Fit hierachical model
+inla.csize <- inla(nmatpost ~ 1 + nmatpre + nlitpre + csize +
+  f(clsnr, model = "iid"), data = csize_data2)
+
+summary(inla.csize)
+```
+
+## Multilevel models for longitudinal data
+
+```{r}
+library("lme4")
+data(sleepstudy)
+
+sleepstudy$Reaction <- sleepstudy$Reaction / 1000
+
+inla.sleep <- inla(Reaction ~ 1 + Days + f(Subject, model = "iid"),
+  data = sleepstudy)
+
+summary(inla.sleep)
+
+# Now fit a model with subject level random slopes
+inla.sleep.w <- inla(Reaction ~ 1 + f(Subject, Days, model = "iid"),
+  data = sleepstudy, control.predictor = list(compute = TRUE))
+# First arguement defines the group (number of slopes) and second the random slope, e.g. covariate that varies per subject
+summary(inla.sleep.w)
+
+
+```
+
+## Multilevel models for binary data
+

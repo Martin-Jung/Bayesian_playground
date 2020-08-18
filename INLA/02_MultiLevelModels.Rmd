@@ -134,3 +134,74 @@ summary(inla.sleep.w)
 
 ## Multilevel models for binary data
 
+```{r}
+# Data from Gelman & Hill
+election88 <- read.table(file = "polls.subset.dat")
+
+# Formatting
+election88$age <- as.factor(election88$age)
+levels(election88$age) <- c("18-29", "30-44", "45-64", "65+")
+
+election88$edu <- as.factor(election88$edu)
+levels(election88$edu) <- c("not.high.school.grad", "high.school.grad",
+  "some.college", "college.grad")
+
+# Add region
+election88$region <- c(3, 4, 4, 3, 4, 4, 1, 1, 5, 3, 3, 4, 4, 2, 2, 2, 2,
+  3, 3, 1, 1, 1, 2, 2, 3, 2, 4, 2, 4, 1, 1, 4, 1, 3, 2, 2, 3, 4, 1, 1, 3,
+  2, 3, 3, 4, 1, 3, 4, 1, 2, 4)[as.numeric(election88$state)]
+
+
+inla.elec88 <- inla(bush ~ 1 + female + black + age + edu +
+    f(state, model = "iid"),
+  data = election88, family = "binomial",
+  control.predictor = list(link = 1)) # For setting a logit link function
+
+summary(inla.elec88)
+
+
+```
+
+## Multilevel models for count data
+
+```{r}
+nyc.stops <- read.table(file = "frisk_with_noise.dat", skip = 6, 
+  header = TRUE)
+
+# Add labels to factors
+nyc.stops$eth <- as.factor(nyc.stops$eth)
+levels(nyc.stops$eth) <- c("black", "hispanic", "white")
+nyc.stops$eth <- relevel(nyc.stops$eth, "white")
+
+nyc.stops$crime <- as.factor(nyc.stops$crime)
+levels(nyc.stops$crime) <- c("violent", "weapons", "property", "drug")
+
+# Aggregate by precinct
+nyc.stops.agg <- aggregate(cbind(stops, past.arrests, pop) ~ precinct + eth,
+  data = nyc.stops, sum)
+
+# Population is summed 4 times
+nyc.stops.agg$pop <- nyc.stops.agg$pop / 4
+
+# Include offset as counts were derived over 15 months period
+nyc.inla <- inla(stops ~ eth + f(precinct, model = "iid"),
+  data = nyc.stops.agg, offset = log((15 / 12) * past.arrests),
+  family = "poisson")
+
+summary(nyc.inla)
+
+# Ethnicity precinct index
+nyc.stops.agg$ID <- 1:nrow(nyc.stops.agg)
+nyc.inla2 <- inla(stops ~ eth + f(precinct, model = "iid") + 
+    f(ID, model = "iid"), 
+  data = nyc.stops.agg, offset = log((15/12) * past.arrests),
+  family = "poisson")
+
+summary(nyc.inla2)
+
+# Random effect estimates that could be plotted
+# Add r. eff. estimates
+nyc.inla$summary.random$precinct$mean
+
+```
+

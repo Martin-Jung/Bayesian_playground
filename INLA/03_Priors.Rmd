@@ -1,0 +1,185 @@
+---
+title: "Some Stuff on Priors"
+output: html_notebook
+---
+
+To set prior directly
+```{r}
+library(INLA)
+
+# All priors
+names(inla.models()$prior)
+
+# What is available
+names(inla.models()$latent$iid$hyper)
+# Can set theta as 
+inla.models()$latent$iid$hyper$theta
+
+# Define a gamma prior
+prec.prior <- list(prec = list(prior = "loggamma", param = c(0.01, 0.01)),
+  initial = 4, fixed = FALSE)
+
+# Pass on
+f <- y ~ 1 + f(idx, model = "iid", hyper = prec.prior)
+
+```
+
+# Defining new custom priors
+
+Character string with 'table:', followed by the values at which the hyperparameters are evaluated and then followed by the values of the log-density.
+
+```{r}
+
+# to set a Gaussian prior with zero mean and precision 0.001 on θ, the table prior can be defined as follows:
+theta <- seq(-100, 100, by = 0.1)
+log_dens <- dnorm(theta, 0, sqrt(1 / 0.001), log = TRUE)
+
+gaus.prior <- paste0("table: ", 
+  paste(c(theta, log_dens), collapse = " ")
+)
+
+# Or alternatively add prior as expression
+"expression:
+  mean = 0;
+  prec = 1000;
+  logdens = 0.5 * log(prec) - 0.5 * log (2 * pi);
+  logdens = logdens - 0.5 * prec * (theta - mean)^2;
+  return(logdens);
+"
+
+
+## Define half-normal prior
+# Truncated at zero
+HN.prior = "expression:
+  tau0 = 0.001;
+  sigma = exp(-theta/2);
+  log_dens = log(2) - 0.5 * log(2 * pi) + 0.5 * log(tau0);
+  log_dens = log_dens - 0.5 * tau0 * sigma^2;
+  log_dens = log_dens - log(2) - theta / 2;
+  return(log_dens);  
+"
+
+## Half-cauchy for sigma
+HC.prior  = "expression:
+  sigma = exp(-theta/2);
+  gamma = 25;
+  log_dens = log(2) - log(pi) - log(gamma);
+  log_dens = log_dens - log(1 + (sigma / gamma)^2);
+  log_dens = log_dens - log(2) - theta / 2;
+  return(log_dens);
+"
+
+## Half Normal
+# Constant is precalculated to save time
+HT.prior = "expression:
+  sigma = exp(-theta/2);
+  nu = 3;
+  log_dens = 0 - 0.5 * log(nu * pi) - (-0.1207822);
+  log_dens = log_dens - 0.5 * (nu + 1) * log(1 + sigma * sigma);
+  log_dens = log_dens - log(2) - theta / 2;
+  return(log_dens);
+"
+
+## Uniform prior
+UN.prior = "expression:
+  log_dens = 0 - log(2) - theta / 2;
+  return(log_dens);
+"
+
+
+```
+
+
+## Penalized complexity priors
+
+Priors that penalize departure from a base model
+
+```{r}
+library(INLA)
+inla.doc()
+#?pc.*
+```
+
+## Sensitivity analysis with R-INLA
+
+```{r}
+# revist practice code from earlier
+csize_data <- read.csv (file = "INLA/class_size_data.txt", header = FALSE,
+  sep = "", dec = ".")
+
+#Set names
+names(csize_data) <- c("clsnr", "pupil", "nlitpre", "nmatpre", "nlitpost",
+  "nmatpost", "csize")
+
+#Set NA's
+csize_data [csize_data < -1e+29 ] <- NA
+
+#Set class size levels
+csize_data$csize <- as.factor(csize_data$csize)
+levels(csize_data$csize) <- c("<=19", "20-24", "25-29", ">=30")
+
+# - #
+# Priors
+prior.list = list(
+  default = list(prec = list(prior = "loggamma", param = c(1, 0.00005))),
+  half.normal = list(prec = list(prior = HN.prior)),
+  half.cauchy = list(prec = list(prior = HC.prior)),
+  h.t = list(prec = list(prior = HT.prior)),
+  uniform = list(prec = list(prior = UN.prior)),
+  pc.prec = list(prec = list(prior = "pc.prec", param = c(5, 0.01)))
+) 
+
+# Remove rows with NA's
+csize_data2 <- na.omit(csize_data[, -5])
+
+# For prior fit a new model
+csize.models <- lapply(prior.list, function(tau.prior) {
+  inla(nmatpost ~ 1 + nmatpre + nlitpre + csize +
+      f(clsnr, model = "iid", hyper = tau.prior), data = csize_data2,
+    control.family = list(hyper = tau.prior))
+})
+
+```
+
+
+## Scaling effects and priors
+From the book:
+
+'Briefly, scaling a model means that the generalized variance of the latent effect is one. This scaling will take the values of the scale hyperparameter to a different range, which implies that different priors should be used for scaled and unscaled models. In addition, this also means that precision estimates are comparable between different models and that estimates are less affected by re-scaling covariates in the linear predictor. Furthermore, re-scaling makes the precision invariant to changes in the shape and size of the latent effect.'
+
+```{r}
+# Lidar data frompackage SemiPar
+
+library("SemiPar")
+data(lidar)
+
+#Data for prediction
+xx <- seq(390, 720, by = 5)
+# Add data for prediction
+new.data <- cbind(range = xx, logratio = NA)
+new.data <- rbind(lidar, new.data)
+
+# Set prior on precision
+prec.prior <- list(prec = list(param = c(0.001, 0.001)))
+# -> note how the sd of the gamma prior has changed. Necessary for the scaling!
+
+#RW1 latent effect
+m.rw1 <- inla(logratio ~ 1 + f(range, model = "rw1", constr = FALSE,
+    hyper = prec.prior),
+  data = new.data, control.predictor = list(compute = TRUE))
+
+#RW1 scaled latent effect
+m.rw1.sc <- inla(logratio ~ 1 + f(range, model = "rw1", constr = FALSE,
+    scale.model = TRUE, hyper = prec.prior),
+  data = new.data, control.predictor = list(compute = TRUE))
+
+#RW2 latent effect
+m.rw2 <- inla(logratio ~ 1 + f(range, model = "rw2", constr = FALSE,
+    hyper = prec.prior),
+  data = new.data, control.predictor = list(compute = TRUE))
+#RW2 scaled latent effect
+m.rw2.sc <- inla(logratio ~ 1 + f(range, model = "rw2", constr = FALSE,
+    scale.model = TRUE,  hyper = prec.prior),
+  data = new.data, control.predictor = list(compute = TRUE))
+```
+

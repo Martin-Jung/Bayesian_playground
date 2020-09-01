@@ -1,0 +1,220 @@
+---
+title: "Advanced stuff"
+output: html_notebook
+---
+
+Create a Predictor matrix for inclusion in INLA
+
+```{r}
+library("MASS")
+library("Matrix")
+library(INLA)
+
+data(cement)
+A <- Diagonal(n = nrow(cement), x = 5)
+summary(A)
+
+m1.A <- inla(y ~ x1 + x2 + x3 + x4, data = cement,
+  control.predictor = list(A = A))
+summary(m1.A)
+
+```
+
+Linear combinations of predictors
+
+```{r}
+# For cement we might interested in the difference between coefficients of covariates x1 and x2.
+inla.make.lincomb(x1 = 1, x2 = -1)
+
+# Or difference between random effects
+inla.make.lincomb(u = c(1, -1, NA, NA))
+
+# Or differences of one variable to three others as contrasts
+inla.make.lincomb(
+  x1 = c( 1,  1,  1),
+  x2 = c(-1,  0,  0),
+  x3 = c( 0, -1,  0),
+  x4 = c( 0,  0, -1)
+)
+
+```
+#  Example
+
+
+```{r}
+library("faraway")
+data(abrasion)
+
+# Prior prec. of random effects
+prec.prior <- list(prec = list(param = c(0.5, 95)))
+
+# Model formula
+f.wear <- wear ~ -1 + material + 
+    f(position, model = "iid", hyper = prec.prior) +
+    f(run, model = "iid", hyper = prec.prior)
+
+# Model fitting
+m0 <- inla(f.wear, data = abrasion,
+  control.fixed = list(prec = 0.001^2)
+)
+# Improve estimates of hyperparameters
+m0 <- inla.hyperpar(m0)
+summary(m0)
+
+# Make linear combination of variables
+lc <- inla.make.lincomb(materialA = 1, materialB = -1)
+
+m0.lc <- inla.hyperpar(inla(f.wear, data = abrasion, lincomb = lc,
+  control.fixed = list(prec = 0.001^2)))
+summary(m0.lc)
+# Summary statistics of the posterior marginal of the linear combination
+m0.lc$summary.lincomb.derived
+
+# For comparing (contrasts) the levels of a random effect
+lc.pos <- inla.make.lincomb(position = c(1, -1, NA, NA))
+
+m0.pos <- inla.hyperpar(inla(f.wear, data = abrasion, lincomb = lc.pos,
+  control.fixed = list(prec = 0.001^2)))
+summary(m0.pos)
+
+# This linear combination considers the sum of the effect of material A, position 1 and run 2
+lc.eff <- inla.make.lincomb(materialA = 1, position = c(1, NA, NA, NA),
+  run = c(NA, 1, NA, NA))
+m0.eff <- inla.hyperpar(inla(f.wear, data = abrasion, lincomb = lc.eff,
+  control.fixed = list(prec = 0.001^2)))
+summary(m0.eff)
+
+```
+
+# Multiple likelihoods!
+
+When using several likelihoods data must be stored in a very particular way. First of all, the response variable must be a matrix with as many columns as likelihoods. Hence, the first column will be the response used by the first likelihood and so on. Data must be stored so that there is one variable per column and a single value of any of the variables per row.
+Same for the response. Each coloumn needs to be filled with NA for values only relevant for one likelihood.
+
+
+```{r}
+# Simulated example
+set.seed(314)
+
+# Gaussian data
+d1 <- rnorm(30)
+
+# Poisson data
+d2 <- rpois(20, 10)
+
+# Data
+d <- matrix(NA, ncol = 2, nrow = 30 + 20)
+d[1:30, 1] <- d1
+d[30 + 1:20, 2] <- d2
+
+# Define a different intercept for each likelihood
+Intercept1 <- c(rep(1, 30), rep(NA, 20))
+Intercept2 <- c(rep(NA, 30), rep(1, 20))
+
+# Share coefficient between likelihoods
+x <- rnorm(30 + 20)
+
+# Define Model
+mult.lik <- inla(Y ~ -1 + I1 + I2 + x,
+  data = list(Y = d, I1 = Intercept1, I2 = Intercept2, x = x),
+  family = c("gaussian", "poisson"))
+
+summary(mult.lik)
+
+
+```
+
+Shared terms with joint likelihood models
+
+```{r}
+set.seed(271)
+#Covariate
+xx <- runif(200, 1, 2)
+#Gaussian data
+y.gaus <- rnorm(150, mean = 2 * xx[1:150])
+#Poisson data
+y.pois <- rpois(50, lambda = exp(2 * xx[151:200]))
+# Response matrix
+y <- matrix(NA, ncol = 2, nrow = 200)
+y[1:150, 1] <- y.gaus
+y[151:200, 2] <- y.pois
+
+# Index vectors
+idx.gaus <- c(rep(1, 150), rep(NA, 50))
+idx.pois <- c(rep(NA, 150), rep(1, 50))
+
+# Fit
+m.copy <- inla(y ~ -1 + f(idx.gaus, xx, model = "iid") +
+  f(idx.pois, xx, copy = "idx.gaus",
+    hyper = list(beta = list(fixed = FALSE))),
+  data = list(y = y, xx = xx),
+  family = c("gaussian", "poisson")
+)
+summary(m.copy)
+
+# Coefficients
+m.copy$summary.random
+
+```
+
+Shared hyperparameters only between x number of fixed effects.
+Using the replicate functionality
+
+```{r}
+library("dlm")
+data(NelPlo, package = "dlm")
+
+# Fit model with gaussian likelihood
+nelplo <- as.vector(NelPlo)
+
+#Number of years
+n <- nrow(NelPlo)
+
+#Index for the ar1 latent effect
+idx.ts <- rep(1:n, 2)
+
+# Index for the replicate effect
+idx.rep <- rep(1:2, each = n)
+
+# Two new variables are created to include two different intercepts for each part of the data:
+i1 <- c(rep(1, n), rep(NA, n))
+i2 <- c(rep(NA, n), rep(1, n))
+
+m.rep <- inla(nelplo ~ -1 + i1 + i2 + 
+  f(idx.ts, model = "ar1", replicate = idx.rep, 
+    hyper = list(prec = list(param = c(0.001, 0.001)))), # vague prior on random effects
+  data = list(nelplo = nelplo, i1 = i1, i2 = i2, idx.ts = idx.ts,
+    idx.rep = idx.rep),
+  control.predictor = list(compute = TRUE)
+)
+
+summary(m.rep)
+
+```
+
+ Linear constraints on the latent effects
+ (using NelPo data above)
+ 
+```{r}
+# Define values of A and e to set linear constraints
+A <- matrix(1, ncol = n, nrow = 1)
+e <- matrix(0, ncol = 1)
+
+m.unconstr <- inla(ip ~ -1 + f(idx, model = "ar1"),
+  data = list(ip = NelPlo[, 1], idx = 1:n),
+  control.family = list(hyper = list(prec = list(initial = 10,
+    fixed = TRUE))),
+  control.predictor = list(compute = TRUE)
+)
+
+# Sum to 0 contraint added
+m.constr <- inla(ip ~ -1 + f(idx, model = "ar1",
+    extraconstr = list(A = A, e = e)),
+  data = list(ip = NelPlo[, 1], idx = 1:n),
+  control.family = list(hyper = list(prec = list(initial = 10,
+    fixed = TRUE))),
+  control.predictor = list(compute = TRUE)
+)                    
+```
+ 
+ 

@@ -1,0 +1,160 @@
+---
+title: "7 Spatial effects"
+output: html_notebook
+---
+
+Different kinds of data available that need to be considered.
+More likely in O'Haras examples and inlabru
+
+# Areal data
+
+```{r}
+library("spatstat")
+library("sp")
+library("maptools")
+
+data(bei)
+
+# Create SpatialPoints object
+bei.pts <- as(bei, "SpatialPoints")
+
+#Create grid
+bei.poly <- as(as.im(bei$window, dimyx=c(5, 10)), "SpatialGridDataFrame")
+bei.poly <- as(bei.poly, "SpatialPolygons")
+
+#Number of observations per cell
+idx <- over(bei.pts, bei.poly)
+tab.idx <- table(idx)
+#Add number of trees
+d <- data.frame(Ntrees = rep(0, length(bei.poly)))
+row.names(d) <- paste0("g", 1:length(bei.poly))
+d$Ntrees[as.integer(names(tab.idx))] <- tab.idx
+
+# Finaly create SpatialPolygonsDataFrame
+bei.trees <- SpatialPolygonsDataFrame(bei.poly, d)
+
+# Mapping
+# INLA considers data sorted by column
+idx.mapping <- as.vector(t(matrix(1:50, nrow = 10, ncol = 5)))
+bei.trees2 <- bei.trees[idx.mapping, ]
+plot(bei.trees2,col = bei.trees$Ntrees)
+
+#Summary statistics of covariates
+covs <- lapply(names(bei.extra), function(X) {
+  layer <- bei.extra[[X]]
+    res <- lapply(1:length(bei.trees2), function(Y) {
+      summary(layer[as.owin(bei.trees2[Y, ])])})
+    res <- as.data.frame(do.call(rbind, res))
+
+    names(res) <- paste0(X, ".", c("min", "1Q", "2Q", "mean", "3Q", "max"))
+    return(res)
+    })
+
+covs <- do.call(cbind, covs)
+
+#Add to SPDF
+bei.trees2@data <- cbind(bei.trees2@data, covs)
+
+library("spdep")
+# Different adjancenies. Queen's or Rook's case
+bei.adj.q <- poly2nb(bei.trees2) 
+bei.adj.r <- poly2nb(bei.trees2, queen = FALSE)
+
+W.bin <- nb2listw(bei.adj.q, style = "B")
+W.rs <- nb2listw(bei.adj.q, style = "W")
+W.bin
+
+```
+
+Now fit an INLA model with spatial component
+
+```{r}
+library("INLA")
+
+#Log-Poisson regression
+m0 <- inla(Ntrees ~ elev.mean + grad.mean, family = "poisson",
+  data = as.data.frame(bei.trees2) )
+
+#Log-Poisson regression with random effects
+bei.trees2$ID <- 1:length(bei.trees2)
+m0.re <- inla(Ntrees ~ elev.mean + grad.mean + f(ID), family = "poisson",
+  data = as.data.frame(bei.trees2) )
+
+# As noted above, INLA assumes that the lattice is stored by columns, i.e., a vector with the first column, then followed by the second column and so on. Hence, a proper mapping between the spatial object with the data and the data.frame used in the call to inla is required.
+
+# Spatial with random walk
+# RW2d
+m0.rw2d <- inla(Ntrees ~ elev.mean + grad.mean +
+    f(ID, model = "rw2d", nrow = 5, ncol = 10),
+  family = "poisson", data = as.data.frame(bei.trees2),
+  control.predictor = list(compute = TRUE),
+  control.compute = list(dic = TRUE) )
+
+summary(m0.rw2d)
+
+# Matern2D
+m0.m2d <- inla(Ntrees ~ elev.mean + grad.mean +
+    f(ID, model = "matern2d", nrow = 5, ncol = 10),
+  family = "poisson", data = as.data.frame(bei.trees2),
+  control.predictor = list(compute = TRUE) )
+
+summary(m0.m2d)
+
+# Add posterior means to the fitted modules
+bei.trees2$RW2D <- m0.rw2d$summary.fitted.values[, "mean"]
+bei.trees2$MATERN2D <- m0.m2d$summary.fitted.values[, "mean"]
+
+plot(bei.trees2,col = RColorBrewer::brewer.pal(10,'Spectral'))
+```
+
+# Irregular lattice data
+
+```{r}
+library("rgdal")
+boston.tr <- readOGR(system.file("shapes/boston_tracts.shp",
+  package="spData")[1])
+boston.adj <- poly2nb(boston.tr)
+
+W.boston <- nb2mat(boston.adj, style = "B") 
+W.boston.rs <- nb2mat(boston.adj, style = "W") 
+
+boston.tr$CMEDV2 <- boston.tr$CMEDV
+boston.tr$CMEDV2 [boston.tr$CMEDV2 == 50.0] <- NA
+
+# Specification
+boston.form  <- log(CMEDV2) ~ CRIM + ZN + INDUS + CHAS + I(NOX^2) + I(RM^2) +
+    AGE + log(DIS) + log(RAD) + TAX + PTRATIO + B + log(LSTAT)
+boston.tr$ID <- 1:length(boston.tr)
+
+# First a model with spatial random effect
+boston.iid <- inla(update(boston.form, . ~. + f(ID, model = "iid")),
+  data = as.data.frame(boston.tr),
+  control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+  control.predictor = list(compute = TRUE)
+)
+summary(boston.iid)
+
+# Need to transform the posterior marginals
+
+# Use 4 cores to process marginals in parallel
+library("parallel")
+options(mc.cores = 4)
+# Transform marginals and compute posterior mean
+#marginals: List of `marginals.fitted.values`from inla model
+tmarg <- function(marginals) {
+  post.means <- mclapply(marginals, function (marg) {
+  # Transform post. marginals
+  aux <- inla.tmarginal(exp, marg)
+  # Compute posterior mean
+  inla.emarginal(function(x) x, aux)
+  })
+
+  return(as.vector(unlist(post.means)))
+}
+
+# Add posterior means to the SpatialPolygonsDataFrame
+boston.tr$IID <- tmarg(boston.iid$marginals.fitted.values)
+plot(boston.tr,col=hsv(boston.tr$IID/100))
+
+```
+

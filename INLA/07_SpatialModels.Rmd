@@ -158,3 +158,177 @@ plot(boston.tr,col=hsv(boston.tr$IID/100))
 
 ```
 
+# Latent models in INLA for irregular lattice data.
+
+Besag’s proper spatial model, Besag’s improper spatial model and the one by Besag, York and Mollié, that is a convolution of an intrinsic CAR model and i.i.d. Gaussian model
+(besag, besagproper and bym )
+
+```{r}
+#Besag's improper
+boston.besag <- inla(update(boston.form, . ~. +
+    f(ID, model = "besag", graph = W.boston)), 
+  data = as.data.frame(boston.tr),
+  control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+  control.predictor = list(compute = TRUE)
+)
+boston.tr$BESAG <- tmarg(boston.besag$marginals.fitted.values)
+
+#Besag proper
+boston.besagprop <- inla(update(boston.form, . ~. +
+    f(ID, model = "besagproper", graph = W.boston)), 
+  data = as.data.frame(boston.tr),
+  control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+  control.predictor = list(compute = TRUE)
+)
+boston.tr$BESAGPROP <- tmarg(boston.besagprop$marginals.fitted.values)
+
+
+#BYM
+boston.bym <- inla(update(boston.form, . ~. +
+    f(ID, model = "bym", graph = W.boston)), 
+  data = as.data.frame(boston.tr),
+  control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+  control.predictor = list(compute = TRUE)
+)
+boston.tr$BYM <- tmarg(boston.bym$marginals.fitted.values)
+
+plot(boston.tr,col=hsv(boston.tr$BESAG/100))
+plot(boston.tr,col=hsv(boston.tr$BESAGPROP/100))
+plot(boston.tr,col=hsv(boston.tr$BYM/100))
+
+
+```
+
+
+# Geostatistics - Gaussian Processes
+
+Geostatistics deals with the analysis of continuous processes in space. A typical example is the spatial distribution of temperature or pollutants in the air. In this case, the variable of interest is only observed at a finite number of points and statistical methods are required for estimation all over the study region.
+
+Matern covariance
+Sigma squared is a general scale parameter. The range of the spatial process is controlled by parameter p. Large values will imply a fast decay in the correlation with distance, which imply a small range spatial process. Small values will indicate a spatial process with a large range. Finally, parameter ν controls smoothness of the spatial process.
+
+```{r}
+library("gstat")
+library(sp)
+library(INLA)
+data("meuse")
+
+summary(meuse)
+
+# Make spatial
+coordinates(meuse) <- ~x+y
+proj4string(meuse) <- CRS("+init=epsg:28992")
+
+#Code from gstat to get the grid
+data(meuse.grid)
+coordinates(meuse.grid) = ~x+y
+proj4string(meuse.grid) <- CRS("+init=epsg:28992")
+gridded(meuse.grid) = TRUE
+
+
+```
+
+## First some kriging
+
+```{r}
+# Variogram and fit variogram
+vgm <- variogram(log(zinc) ~ dist, meuse)
+fit.vgm <- fit.variogram(vgm, vgm("Sph"))
+
+# Krige with square root of predicted variance
+krg <- krige(log(zinc) ~ dist, meuse, meuse.grid, model = fit.vgm)
+
+#Add estimates to meuse.grid
+meuse.grid$zinc.krg <- krg$var1.pred
+meuse.grid$zinc.krg.sd <- sqrt(krg$var1.var)
+
+spplot(meuse.grid)
+
+```
+
+Now model the Meuse dataset with INLA
+
+```{r}
+library(maptools)
+# First create a boundary of the study region
+meuse.bdy <- unionSpatialPolygons(
+  as(meuse.grid, "SpatialPolygons"), rep (1, length(meuse.grid))
+)
+
+# Define 2d mesh
+pts <- meuse.bdy@polygons[[1]]@Polygons[[1]]@coords
+mesh <- inla.mesh.2d(loc.domain = pts, max.edge = c(150, 500),
+  offset = c(100, 250) )
+
+par(mar = c(0, 0, 0, 0))
+plot(mesh, asp = 1, main = "")
+lines(pts, col = 3)
+
+# Next create object for the Matern model
+meuse.spde <- inla.spde2.matern(mesh = mesh, alpha = 2)
+A.meuse <- inla.spde.make.A(mesh = mesh, loc = coordinates(meuse))
+s.index <- inla.spde.make.index(name = "spatial.field",
+  n.spde = meuse.spde$n.spde)
+
+```
+
+Data passed to ´inla()´ when a SPDE is used needs to be in a particular format. For this, the ´inla.stack´ function is provided. It will take data in different ways, including the SPDE indices, and arrange them conveniently for model fitting. In short, ´inla.stack´ will be a list with the following named elements:
+
+- data: a list with data vectors.
+
+- A: a list of projector matrices.
+
+- effects: a list of effects (e.g., the SPDE index) or predictors (i.e., covariates).
+
+- tag: a character with a label for this group of data.
+
+```{r}
+#Create data structure
+meuse.stack <- inla.stack(data  = list(zinc = meuse$zinc),
+  A = list(A.meuse, 1), # Projector matrix
+  effects = list(c(s.index, list(Intercept = 1)),
+    list(dist = meuse$dist)),
+  tag = "meuse.data") # For indicating that this in the dataset
+
+#Create data structure for prediction
+A.pred <- inla.spde.make.A(mesh = mesh, loc = coordinates(meuse.grid))
+meuse.stack.pred <- inla.stack(data = list(zinc = NA), # Set reponse to NA
+  A = list(A.pred, 1),
+  effects = list(c(s.index, list (Intercept = 1)),
+    list(dist = meuse.grid$dist)),
+  tag = "meuse.pred")
+
+#Join stack
+join.stack <- inla.stack(meuse.stack, meuse.stack.pred)
+
+#Fit model
+form <- log(zinc) ~ -1 + Intercept + dist + f(spatial.field, model = spde)
+
+# Data passed to the inla function needs to be joined with the definition of the SPDE to fit the spatial model. This is done with function inla.stack.data. Furthermore, control.predictor will need to take the projector matrix for the whole dataset (model fitting and prediction) using function inla.stack.A in join.stack. 
+
+m1 <- inla(form, data = inla.stack.data(join.stack, spde = meuse.spde),
+  family = "gaussian",
+  control.predictor = list(A = inla.stack.A(join.stack), compute = TRUE),
+  control.compute = list(cpo = TRUE, dic = TRUE))
+
+#Get predicted data on grid
+index.pred <- inla.stack.index(join.stack, "meuse.pred")$data
+
+meuse.grid$zinc.spde <- m1$summary.fitted.values[index.pred, "mean"]
+meuse.grid$zinc.spde.sd <- m1$summary.fitted.values[index.pred, "sd"]
+
+#Compute statistics in terms or range and variance
+spde.est <- inla.spde2.result(inla = m1, name = "spatial.field",
+  spde = meuse.spde, do.transf = TRUE)
+
+# Kappa
+#inla.zmarginal(spde.est$marginals.kappa[[1]])
+#Variance
+inla.zmarginal(spde.est$marginals.variance.nominal[[1]])
+#Range
+inla.zmarginal(spde.est$marginals.range.nominal[[1]])
+
+```
+
+# Point patterns - LGCP and co
+

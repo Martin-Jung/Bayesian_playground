@@ -1,0 +1,140 @@
+---
+title: "8 Temporal models"
+output: html_notebook
+---
+
+# Start with autoregressive models
+
+```{r}
+library(INLA)
+climate <- read.table(file = "https://www.uni-goettingen.de/de/document/download/77ac62676cd7f0c1679020c513f0b0d0.raw/moberg2005.raw", header = TRUE)
+
+climate.ar1 <- inla(temp ~ 1 + f(year, model = "ar1"), data = climate,
+  control.predictor = list(compute = TRUE)
+)
+summary(climate.ar1)
+# Small coefficients indicative for overfit, add informative prior
+
+# Variation possible
+climate.ar1 <- inla(temp ~ 1 + f(year, model = "ar1", 
+    hyper = list(prec = list(param = c(10, 100)))), data = climate,
+  control.predictor = list(compute = TRUE),
+  control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+  control.family = list(hyper = list(prec = list(param = c(10, 100))))
+)
+summary(climate.ar1)
+
+# Random walk add
+climate.rw1 <- inla(temp ~ 1 + f(year, model = "rw1", constr = FALSE,
+    hyper = list(prec = list(param = c(10, 100)))), data = climate,
+  control.predictor = list(compute = TRUE),
+  control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+  control.family = list(hyper = list(prec = list(param = c(10, 100))))
+)
+summary(climate.rw1)
+
+# Comparison of cpo
+- sum(log(climate.ar1$cpo$cpo))
+- sum(log(climate.rw1$cpo$cpo))
+
+## And of non-gaussian responses
+library("MixtureInf")
+data(earthquake)
+#Add year
+earthquake$year <- 1900:2006
+
+quake.ar1 <- inla(number ~ 1 + f(year, model = "ar1"), data = earthquake,
+  family = "poisson", control.predictor = list(compute = TRUE))
+# Or with random walkd
+quake.rw1 <- inla(number ~ 1 + f(year, model = "rw1"), data = earthquake,
+  family = "poisson", control.predictor = list(compute = TRUE))
+
+## Forecasting
+quake.pred <- rbind(earthquake, 
+  data.frame(number = rep(NA, 14), year = 2007:2020))
+
+quake.ar1.pred <- inla(number ~ 1 + f(year, model = "ar1"), data = quake.pred,
+  family = "poisson", control.predictor = list(compute = TRUE, link = 1))
+summary(quake.ar1.pred)
+```
+
+## Statespace model
+
+```{r}
+library("KFAS")
+data(alcohol)
+
+# Put into matrix as there are two likelihoods
+n <- nrow(alcohol) - 1 #There is an NA
+Y <- matrix(NA, ncol = 2, nrow = n + (n - 1))
+Y[1:n, 1] <- alcohol[1:n, 1]
+Y[-c(1:n), 2] <- 0
+
+#offset for first population specifically
+oset <- c(alcohol[1:n, 5], rep(NA, n - 1))
+
+#x_t
+i <- c(1:n, 2:n)
+#x_(t-1) 2:n
+j <- c(rep(NA, n), 1:(n - 1))
+# Weight to have -1 * x_(t-1)
+w1 <- c(rep(NA, n), rep(-1, n - 1))
+#x_(t-1), 2:n
+l <- c(rep(NA, n), 2:n)
+# Weight to have  * omega_(t-1)
+w2 <- c(rep(NA, n), rep(-1, n - 1))
+
+prec.prior <- list(prec = list(param = c(0.001, 0.001)))
+alc.inla <- inla(Y ~ 0 + offset(log(oset)) +
+    f(i, model = "iid",
+      hyper = list(prec = list(initial = -10, fixed = TRUE))) +
+    f(j, w1, copy = "i") + f(l, w2, model = "iid"),
+  data = list(Y = Y, oset = oset), family = c("poisson", "gaussian"),
+  control.family = list(list(), 
+    list(hyper = list(prec = list(initial = 10, fixed = TRUE)))),
+  control.predictor = list(compute = TRUE)
+)
+
+
+```
+
+# Spatial temporal stuff
+```{r}
+library("DClusterm")
+library(INLA)
+data(brainNM)
+
+nm.adj <- poly2nb(brainst@sp)
+adj.mat <- as(nb2mat(nm.adj, style = "B"), "Matrix")
+
+# Next, the model is fit considering a separable model. In particular, the spatial effect is modeled using an ICAR model and the temporal trend using a rw1 latent effect. We will use vague priors to avoid overfitting.
+
+# Prior of precision
+prec.prior <- list(prec = list(param = c(0.001, 0.001)))
+
+brain.st <- inla(Observed ~ 1 + f(Year, model = "rw1",
+      hyper = prec.prior) + 
+    f(as.numeric(ID), model = "besag", graph = adj.mat,
+      hyper = prec.prior),
+  data = brainst@data, E = Expected, family = "poisson",
+  control.predictor = list(compute = TRUE, link = 1))
+summary(brain.st)
+# This model assumes that the variation in each county is the sum of the spatial random effect and the overall temporal trend, i.e., there is no way to account for county-specific pattern
+
+## Separable models with the group option
+names(inla.models()$group)
+
+brainst@data$ID.Year <- brainst@data$Year - 1973 + 1
+brainst@data$ID2 <- brainst@data$ID
+
+brain.st2 <- inla(Observed ~ 1 + 
+    f(as.numeric(ID2), model = "besag", graph = adj.mat,
+      group = ID.Year, control.group = list(model = "ar1"),
+        hyper = prec.prior),
+  data = brainst@data, E = Expected, family = "poisson",
+  control.predictor = list(compute = TRUE, link = 1))
+summary(brain.st2)
+# More spatial-temporal smoothing
+inla.knmodels()
+```
+

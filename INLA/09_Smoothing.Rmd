@@ -1,0 +1,125 @@
+---
+title: "9 Smoothing"
+output: html_notebook
+---
+
+# Smoothing
+
+```{r}
+library(INLA)
+library("SemiPar")
+data(lidar)
+
+# Synthetic data for prediction
+xx <- seq(390, 720, by = 5)
+# Add data for prediction
+new.data <- cbind(range = xx, logratio = NA)
+new.data <- rbind(lidar, new.data)
+
+
+m.poly <- inla(logratio ~ 1 + range +  I(range^2) + I(range^3),
+  data = new.data, control.predictor = list(compute = TRUE))
+
+# Use b-splines from splines package
+library("splines")
+
+knots <- seq(400, 700, by = 10)
+m.bs3 <- inla(logratio ~ 1 + bs(range, knots = knots),
+  data = new.data, control.predictor = list(compute = TRUE))
+
+# Cubic splines
+#These types of splines are cubic splines with the added constraint that they are linear at the tail beyond the boundary knots by imposing that the second and third derivatives at the boundary knots (i.e., the ones at the extremes) are equal to zero.
+
+m.ns3 <- inla(logratio ~ 1 + ns(range, df = 10),
+  data = new.data, control.predictor = list(compute = TRUE))
+summary(m.ns3)
+# Equally spaced knots
+attr(ns(lidar$range, df = 10), "knots")
+
+
+# --------- #
+```
+
+
+```{r}
+# Note that constr is set to FALSE and that, for this reason, the intercept is not included in the linear predictor.
+m.rw1 <- inla(logratio ~ -1 + f(range, model = "rw1", constr = FALSE),
+  data = lidar, control.predictor = list(compute = TRUE))
+summary(m.rw1)
+
+m.rw2 <- inla(logratio ~ -1 + f(range, model = "rw2", constr = FALSE),
+  data = lidar, control.predictor = list(compute = TRUE))
+summary(m.rw2)
+
+# Example splitting the data into 20 bins
+lidar$range.grp <- inla.group(lidar$range, n = 20, method = "quantile")
+summary(lidar$range.grp)
+m.grp.rw1 <- inla(logratio ~ -1 + f(range.grp, model = "rw1", constr = FALSE),
+  data = lidar, control.predictor = list(compute = TRUE))
+summary(m.grp.rw1)
+
+m.grp.rw2 <- inla(logratio ~ -1 + f(range.grp, model = "rw2", constr = FALSE),
+  data = lidar, control.predictor = list(compute = TRUE))
+summary(m.grp.rw2)
+```
+
+## SPDE smoothing
+
+For the case of irregularly spaced data or knots, it is possible to build smooth terms using other latent effects in INLA. Here one-dimensional matern process
+
+```{r}
+# Set knots
+mesh1d <- inla.mesh.1d(seq(390, 720, by = 20)) 
+A1 <- inla.spde.make.A(mesh1d, lidar$range)
+
+# Define spde model
+spde1 <- inla.spde2.matern(mesh1d, constr = FALSE)
+spde1.idx <- inla.spde.make.index("x", n.spde = spde1$n.spde)
+
+# First the stack to fit the model
+stack <- inla.stack(data = list(y = lidar$logratio),
+  A = list(1, A1),
+  effects = list(Intercept = rep(1, nrow(lidar)), spde1.idx),
+  tag = "est")
+
+# Second stack for the points of the function that needs to be evaluated
+# Predict at a finer grid
+xx <- seq(390, 720, by = 5)
+A.xx <- inla.spde.make.A(mesh1d, xx)
+stack.pred <- inla.stack(data = list(y = NA),
+  A = list(1, A.xx),
+  effects = list(Intercept = rep(1, length(xx)), spde1.idx),
+  tag = "pred")
+
+# Stack the stacks
+joint.stack <- inla.stack(stack, stack.pred)
+
+formula <- y ~ -1 + f(x, model = spde1)
+m.spde <- inla(formula, data = inla.stack.data(joint.stack),
+  control.predictor = list(A = inla.stack.A(joint.stack), compute = TRUE)
+)
+summary(m.spde)
+
+```
+
+## Non-gaussian models
+
+```{r}
+library("drc")
+
+data(H.virescens)
+levels(H.virescens$sex) <- c("Female", "Male")
+summary(H.virescens)
+
+vir.rw1 <- inla(numdead ~ -1 + f(dose, model = "rw1", constr = FALSE) + sex,
+  data = H.virescens, family ="binomial", Ntrial = total,
+  control.predictor = list(compute = TRUE))
+summary(vir.rw1)
+
+vir.rw2 <- inla(numdead ~ -1 + f(dose, model = "rw2", constr = FALSE) + sex,
+  data = H.virescens, family = "binomial", Ntrial = total,
+  control.predictor = list(compute = TRUE))
+summary(vir.rw2)
+
+```
+

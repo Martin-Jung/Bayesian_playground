@@ -1,0 +1,268 @@
+---
+title: "11 Latent Models"
+output: html_notebook
+---
+
+(skipped survival models. Maybe do later if of interest)
+
+# 11 Implementing New Latent Models
+
+Spatial latent effects
+
+```{r}
+library("spdep")
+library("rgdal")
+
+SIDS <- readOGR(system.file("shapes/sids.shp", package="spData")[1])
+proj4string(SIDS) <- CRS("+proj=longlat +ellps=clrk66")
+
+#Expected cases
+SIDS$EXP74 <- SIDS$BIR74 * sum(SIDS$SID74) / sum(SIDS$BIR74)
+#Standardised Mortality Ratio
+SIDS$SMR74 <- SIDS$SID74 / SIDS$EXP74
+#Proportion of non-white births
+SIDS$PNWB74 <- SIDS$NWBIR74 / SIDS$BIR74
+
+#Adjacency matrix
+adj <- poly2nb(SIDS)
+W <- as(nb2mat(adj, style = "B"), "sparseMatrix")
+
+# The model is well defined if the eigen values are over a W
+e.values <- eigen(W)$values
+rho.min <- min(e.values)
+rho.max <- max(e.values)
+
+#Re-scale adjacency matrix so that spatial autocorrelation is lower than 1
+W <- W / rho.max
+
+# Function for defining theta
+interpret.theta <- function() {
+  return(
+    list(prec = exp(theta[1L]),
+    rho = 1 / (1 + exp(-theta[2L])))
+  )
+}
+
+# Graph, e.g what entries are non-zero
+graph <- function(){
+  require(Matrix)
+  return(Diagonal(nrow(W), x = 1) + W)
+}
+
+# Precision matrix
+Q <- function() {
+  require(Matrix)
+  param <- interpret.theta()
+  return(param$prec * (Diagonal(nrow(W), x = 1) - param$rho * W) )
+}
+# Mean is zero
+mu = function(){ return(numeric(0)) }
+
+# The logarithm of the normalizing constant in this case is the typical normalizing constant of a multivariate Gaussian distribution:
+log.norm.const <- function() {
+  param <- interpret.theta()
+  n <- nrow(W)
+
+  Q <- param$prec * (Diagonal(nrow(W), x = 1) - param$rho * W)
+
+  res <- n * (-0.5 * log(2 * pi)) +
+    0.5 * Matrix::determinant(Q, logarithm = TRUE)
+
+  return(res)
+}
+
+# Log prior using a gamma distribution
+log.prior <- function() {
+  param = interpret.theta()
+
+  res <- dgamma(param$prec, 1, 5e-05, log = TRUE) + log(param$prec) +
+      log(1) + log(param$rho) + log(1 - param$rho)
+
+  return(res)
+}
+
+# Initial paramters
+initial <- function() {
+  return(rep(0, 0))
+}
+
+quit <- function() {return(invisible())}
+
+# Defining the model
+'inla.rgeneric.CAR.model' <- function(
+  cmd = c("graph", "Q", "mu", "initial", "log.norm.const",
+    "log.prior", "quit"),
+  theta = NULL) {
+
+  #Internal function
+  interpret.theta <- function() {
+    return(
+      list(prec = exp(theta[1L]),
+      rho = 1 / (1 + exp(-theta[2L])))
+    )
+  }
+
+  graph <- function(){
+    require(Matrix)
+
+    return(Diagonal(nrow(W), x = 1) + W)
+  }
+
+  Q <- function() {
+    require(Matrix)
+
+    param <- interpret.theta()
+
+    return(param$prec * (Diagonal(nrow(W), x = 1) - param$rho * W) )
+  }
+
+  mu <- function()
+  {
+    return(numeric(0))
+  }
+
+  log.norm.const <- function() {
+    return(numeric(0))
+
+  }
+
+  log.prior <- function() {
+    param = interpret.theta()
+
+    res <- dgamma(param$prec, 1, 5e-05, log = TRUE) + log(param$prec) +
+      log(1) + log(param$rho) + log(1 - param$rho) 
+
+    return(res)
+  }
+
+  initial <- function() {
+    return(c(0, 0))
+  }
+
+  quit <- function() {
+    return(invisible())
+  }
+
+  res <- do.call(match.arg(cmd), args = list())
+  return(res)
+}
+
+
+library("INLA")
+
+CAR.model <- inla.rgeneric.define(inla.rgeneric.CAR.model, W = W)
+
+# Note that inla.rgeneric.define() takes as first argument the function that defines the latent effect followed by a sequence of named arguments with variables that are required in the computation of the latent effect. In this case, matrix W is the adjacency matrix required by the CAR latent effect but more arguments could follow when needed.
+
+SIDS$idx <- 1:nrow(SIDS)
+
+f.car <- SID74 ~ 1 + f(idx, model = CAR.model)
+
+m.car <- inla(f.car, data = as.data.frame(SIDS), family = "poisson",E = SIDS$EXP74)#, control.inla = list(tolerance = 1e-20, h = 1e-4))
+
+marg.prec <- inla.tmarginal(exp, m.car$marginals.hyperpar[[1]])
+marg.rho <- inla.tmarginal(function(x) { 1/(1 + exp(-x))}, m.car$marginals.hyperpar[[2]])
+inla.zmarginal(marg.prec, FALSE)
+
+SIDS$CAR <- m.car$summary.random$idx[, "mean"]
+spplot(SIDS, "CAR",  col.regions = rev(inferno(16)))
+
+```
+
+# Bayesian model averaging
+
+```{r}
+# Car model with inla
+car.inla <- function(formula, d, rho, W, ...) {
+
+  #Create structure of precision matrix I - rho * W
+  IrhoW <- Matrix::Diagonal(nrow(W), x = 1) - rho * W
+
+  #Add CAR index
+  d$CARidx <- 1:nrow(d)
+
+  formula <- update(formula, . ~ . + f(CARidx, model = "generic0", 
+            Cmatrix = IrhoW))
+  res <- inla(formula, data = d, ..., control.compute = list(mlik = TRUE),
+    control.inla = list(tolerance = 1e-20, h = 1e-4))
+
+  #Update mlik
+  logdet <- determinant(IrhoW)$modulus
+  res$mlik <- res$mlik + logdet / 2
+
+  return(res)
+}
+
+# Points for evaluating the model
+rho.val <- seq(0.5, 1, length.out = 100)
+
+library("parallel")
+options(mc.cores = 4)
+
+# Fit car models
+car.models <- mclapply (rho.val, function(rho) {
+    car.inla(SID74 ~ 1, as.data.frame(SIDS), rho, W, 
+      family = "poisson", E = SIDS$EXP74, 
+      num.threads = 1)
+})
+
+# Use INLABMA for averaging the posterior marginals
+# weighted sum of conditional posterior marginals from different models.
+library(INLABMA)
+car.bma <- INLABMA(car.models, rho.val, log(1))
+
+#Obtain log-marginal likelihoods
+mliks <- unlist(lapply(car.models, function(X){X$mlik[1, 1]}))
+
+# Fixed effects
+car.bma$summary.fixed
+
+```
+
+# Inla with MCMC
+
+```{r}
+# INLA with MCMC 
+# INLAMH
+# It requires a function to fit the model conditional on some of the hyperparameters, two functions (that implement the proposal distribution) to sample new values of the hyperparameters and compute its density, and the prior of the hyperparameters.
+
+fit.inla <- function(d, x){
+  #Rho
+  rho <- x
+  res <- car.inla(SID74 ~ 1, d, rho, W,
+    family = "poisson", E = d$EXP74)
+  return(list(model.sim = res, mlik = res$mlik[1, 1]))
+}
+
+library("logitnorm")
+#Sample values of rho
+rq.rho <- function(x, sigma = 0.15) {
+  rlogitnorm(1, mu = logit(x), sigma = sigma)
+}
+
+#Log-density of proposal distribution
+dq.rho <- function(x, y, sigma = 0.15, log = TRUE) {
+  dlogitnorm(y, mu = logit(x), sigma = sigma, log = log)
+}
+# Here, x represents the current value of ρ, y the proposed value and sigma is the standard deviation of the proposal distribution. 
+
+# Finally the prior
+#Log-density of prior
+prior.rho <- function(rho, log = TRUE) {
+  return(dunif(rho, log = log)) # Uniform prior
+}
+
+# MCMC with samples from the prior
+inlamh.res <- INLAMH(as.data.frame(SIDS), fit.inla, 0.95, rq.rho, dq.rho,
+  prior.rho, n.sim = 100, n.burnin = 100, n.thin = 5, verbose = TRUE)
+
+rho.sim <- unlist(inlamh.res$b.sim)
+#Posterior mean and sd
+mean(rho.sim);sd(rho.sim)
+
+# For example, INLA assumes that all hyperparameters are continuous in some interval. BMA and INLA within MCMC can be used to fit models in which the hyperparameters are discrete.
+
+
+
+```
+

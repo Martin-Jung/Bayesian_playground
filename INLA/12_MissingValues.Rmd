@@ -1,0 +1,215 @@
+---
+title: "12 Missing value imputation"
+output: html_notebook
+---
+
+Missing completely at random (MCAR) occurs when the missing data are independent from the observed or unobserved data. This means that the missing values can be ignored and the analysis can be conducted as usual. 
+
+Missing at random (MAR) occurs when the missing data depends on the observed data. In this case, this can be introduced into the model so that missing observations are imputed as part of the model fitting. 
+
+Finally, Missing not at random (MNAR) occurs when the missingness mechanism depends on both the observed and missing data. This scenario is difficult to tackle since there is no information about the missingness mechanism and the missing data.
+
+## Missing data imputation using the predictive distribution
+
+```{r}
+library("mice")
+data(fdgs)
+summary(fdgs)
+
+# Subset for speed-up and testing
+# Subsect 1, observations with NA's
+subset1 <- which(is.na(fdgs$wgt) | is.na(fdgs$hgt))
+
+#Subset 2, random sample of 500 individuals
+set.seed(1)
+subset2 <- sample((1:nrow(fdgs))[-subset1], 1000)
+# Subset 1 + subset 2
+fdgs.sub <- fdgs[c(subset1, subset2), ]
+summary(fdgs.sub)
+
+# Fit model. Calculate predictive distribution of missing data
+library("INLA")
+hgt.inla <- inla(hgt ~ age + sex, data = fdgs.sub,control.predictor = list(compute = TRUE))
+summary(hgt.inla)
+
+hgt.na <- which(is.na(fdgs.sub$hgt))[1:2]
+rownames(fdgs.sub)[hgt.na]
+
+# Summary statistics of the fitted values
+hgt.inla$summary.fitted.values[hgt.na, c("mean", "sd")]
+
+wgt.inla <- inla(wgt ~ age + sex, data = fdgs.sub,
+                 control.predictor = list(compute = TRUE),
+                 control.compute = list(config = TRUE))
+summary(wgt.inla)
+
+wgt.na <- which(is.na(fdgs.sub$wgt))
+wgt.inla$summary.fitted.values[wgt.na[1:2], c("mean", "sd")]
+
+```
+
+```{r}
+# Model with two gaussian likelihood functions
+
+# Put response in two column matrix
+n <- nrow(fdgs.sub)
+y <- matrix(NA, nrow = 2 * n, ncol = 2)
+y[1:n, 1] <- fdgs.sub$hgt
+y[n + 1:n, 2] <- fdgs.sub$wgt
+
+# Two different intercepts
+I <- matrix(NA, nrow = 2 * n, ncol = 2)
+I[1:n, 1] <- 1
+I[n + 1:n, 2] <- 1
+
+SEX <- matrix(NA, nrow = 2 * n, ncol = 2)
+SEX[1:n, 1] <- fdgs.sub$sex
+SEX[n + 1:n, 2] <- fdgs.sub$sex
+
+age.joint <- rep(fdgs.sub$age, 2)
+
+# Index
+idx.age = rep(1:2, each = n)
+
+# Model formula
+joint.f <- y ~ -1 + I + f(idx.age, age, model = "iid2d", n = 2) + SEX
+# Model fit
+fdgs.joint <- inla(joint.f, 
+  data = list(y = y, I = I, SEX = SEX, age = age.joint, idx.age = idx.age),
+  family = rep("gaussian", 2),
+  control.predictor = list(compute = TRUE))
+# Summary
+summary(fdgs.joint)
+
+fdgs.joint$summary.random$idx.age
+fdgs.joint$summary.fitted.values[hgt.na, c("mean", "sd")]
+fdgs.joint$summary.fitted.values[n + wgt.na[1:2], c("mean", "sd")]
+
+```
+
+## Imputation of missing covariates
+
+Here we build a submodel to be fitted to to the missing data
+
+```{r}
+hgt.noimp <- inla(hgt ~ 1 +  age + sex + wgt, data = fdgs.sub)
+
+#Next, we take the previous model fit to wgt to plug-in the posterior means of the missing observations into a new imputed data set called fdgs.imp:
+
+fdgs.plg <- fdgs.sub
+fdgs.plg$wgt[wgt.na] <- wgt.inla$summary.fitted.values[wgt.na, "mean"]
+
+# This new dataset is used to fit a new model where there are only missing observations in the response:
+hgt.plg <- inla(hgt ~ 1 +  age + sex + wgt, data = fdgs.plg, control.predictor = list(compute = TRUE))
+summary(hgt.plg)
+
+# height estimates for the first two children
+hgt.plg$summary.fitted.values[hgt.na[1:2], ]
+
+
+n.imp <- 50
+wgt.pred <- inla.posterior.sample(n.imp, wgt.inla)
+
+# Latent samples from the posterior for missing dat
+wgt.pred[[1]]$latent[wgt.na,]
+
+# Multiple fits with latent imputed variables
+imp.models <- lapply(1:n.imp, function(i) {
+  fdgs.plg$wgt[wgt.na] <- wgt.pred[[i]]$latent[wgt.na, ]
+  inla(hgt ~ 1 +  age + sex + wgt, data = fdgs.plg,
+    control.predictor = list(compute = TRUE))
+})
+
+# Bayesian model averaging
+model.imp <- inla.merge(imp.models, rep(1 / n.imp, n.imp))
+
+marg.fixed <- model.imp$marginals.fixed
+marg.hyperpar <- model.imp$marginals.hyperpar
+
+# Similarly, summary statistics of the predictive distribution for the first two children with missing values of height can be obtained using the estimates of the linear predictor:
+model.imp$summary.linear.predictor[hgt.na[1:2], ]
+# Note that if the likelihood is not Gaussian in order to get the estimates of the fitted values the linear predictor needs to be conveniently transformed.
+
+```
+
+# Multiple imputation of missing data
+
+
+```{r}
+library(INLA)
+library("mice")
+
+data(nhanes2)
+summary(nhanes2)
+
+m1 <- inla(chl ~ 1 + bmi + age, data = nhanes2)
+summary(m1)
+
+#Generic variables for model fitting
+d.mis <- nhanes2
+idx.mis <- which(is.na(d.mis$bmi))
+n.mis <- length(idx.mis)
+
+#Fit linear model with R-INLA with a fixed beta
+#d.mis: Dataset
+#x.mis: Imputed values
+fit.inla <- function(data, x.mis) {
+
+   data$bmi[idx.mis] <- x.mis
+
+   res <- inla(chl ~ 1 + bmi + age, data = data)
+
+   return(list(mlik = res$mlik[1,1], model = res))
+}
+
+# Next, the proposal distribution is defined. In this case, a Gaussian distribution centered at the current imputed values of bmi with variance 10 is used
+#Proposal x -> y
+#density
+dq.beta <- function(x, y, sigma = sqrt(10), log =TRUE) {
+    res <- dnorm(y, mean = x, sd = sigma, log = log)
+
+    if(log) {
+        return(sum(res))
+    } else {
+        return(prod(res))
+    }
+}
+#random
+rq.beta <- function(x, sigma = sqrt(10) ) {
+    rnorm(length(x), mean = x, sd = sigma)
+}
+
+#Prior for beta
+prior.beta <- function(x, mu = mean(d.mis$bmi, na.rm = TRUE), 
+   sigma = 2*sd(d.mis$bmi, na.rm = TRUE), log = TRUE) {
+   res <- dnorm(x, mean = mu, sd= sigma, log = log)
+
+    if(log) {
+        return(sum(res))
+    } else {
+        return(prod(res))
+    }
+}
+
+
+library("INLABMA")
+
+# Set initial values to mean of bmi
+d.init <- rep(mean(d.mis$bmi, na.rm = TRUE), n.mis)
+#Run MCMC simulations
+inlamh.res <- INLAMH(d.mis, fit.inla, d.init,
+  rq.beta, dq.beta, prior.beta, 
+  n.sim = 100, n.burnin = 50, n.thin = 10)
+
+#Show results
+x.sim <- do.call(rbind, inlamh.res$b.sim)
+summary(x.sim)
+
+nhanes2.models <- lapply(inlamh.res$model.sim, function(X) { X$model })
+nhanes2.imp <- inla.merge(nhanes2.models, rep(1, length(nhanes2.models)))
+summary(nhanes2.imp)
+
+# As compared to the model fit to the observations without missing values of bmi, the posterior means of all the fixed effects change.
+
+
+```

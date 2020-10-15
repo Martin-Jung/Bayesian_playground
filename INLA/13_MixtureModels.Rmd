@@ -1,0 +1,196 @@
+---
+title: "13 Mixture Models"
+output: html_notebook
+---
+
+```{r}
+library("MASS")
+data(geyser)
+summary(geyser)
+
+# Split distribution into two groups
+#Index of group 1
+idx1 <- geyser$duration <=3
+
+# Empty response
+yy <- matrix(NA, ncol = 2, nrow = nrow(geyser))
+
+#Add data
+yy[idx1, 1] <- geyser$duration[idx1]
+yy[!idx1, 2] <- geyser$duration[!idx1]
+
+#Create two different intercepts for each model
+II <- yy
+II[II > 0] <- 1
+
+#Fit model with INLA
+# Each likelihood gets a different intercept
+geyser.inla <- inla(duration ~ -1 + Intercept,
+  data = list(duration = yy, Intercept = II), 
+  family = c("gaussian", "gaussian"))
+summary(geyser.inla)
+
+```
+
+#
+
+```{r}
+# Number of groups
+n.grp <- 2
+
+# Initial classification
+grp <- rep(1, length(geyser$duration))
+grp[!idx1] <- 2
+
+#y: Vector of values with the response.
+#grp: Vector of integers with the allocation variable.
+fit.inla.internal <- function(y, grp) {
+
+  #Data in two-column format
+  yy <- matrix(NA, ncol = n.grp, nrow = length(y))
+  for(i in 1:n.grp) {
+    idx <- which(grp == i)
+    yy[idx, i] <- y[idx]
+  }
+
+  #X stores the intercept in the model
+  x <- yy
+  x[!is.na(x)] <- 1
+  
+  d <- list(y = yy, x = x)
+
+  #Model fit (conditional on z)
+  m1 <- inla(y ~ -1 + x, data = d,
+    family = rep("gaussian", n.grp),
+    #control.fixed = list(mean = list(x1 = 2, x2 = 4.5), prec = 1)
+    control.fixed = list(mean = prior.means, prec = 1)
+  )
+
+  res<- list(model = m1, mlik = m1$mlik[1, 1])
+  return(res)
+}
+
+# The initial data structure to represent the assignment to groups and the associated model fit (as described above) is defined next in variable grp.init. Note that given that this includes the model fit the prior means of the Gaussian prior distributions on the group means are defined through variables prior.means
+
+y <- geyser$duration
+
+prior.means <- list(x1 = 2, x2 = 4.5)
+scale.sigma <- 1.25
+grp.init <- list(z = grp, m = fit.inla.internal(y, grp))
+
+#Probabilities of belonging to each group
+#z: Vector of integers with values from 1 to the number of groups
+get.probs <- function(z) {
+  probs <- rep(0, n.grp)
+  tab <- table(z)
+  probs[as.integer(names(tab))] <- tab / sum(tab)
+  return(probs)
+}
+
+#Using means of conditional marginals
+#FIXME: We do not consider possble label switching here
+#z.old: Current value of z.
+#z.new: Proposed value of z.
+#log: Compute density in the log-scale.
+dq.z <- function(z.old, z.new, log = TRUE) {
+  m.aux <- z.old$m$model 
+  means <- m.aux$summary.fixed[, "mean"]
+  precs <- m.aux$summary.hyperpar[, "mean"]
+
+  ww <- get.probs(z.old$z)
+
+  z.probs <- sapply(1:length(y), function (X) {
+    aux <- ww * dnorm(y[X], means, scale.sigma * sqrt(1 / precs))
+    (aux / sum(aux))[z.new$z[X]]
+  })
+
+  if(log) {
+    return(sum(log(z.probs)))
+  } else {
+    return(prod(z.probs))
+  }
+}
+
+#FIXME: We do not consider possible label switching here
+#z: Current value of z.
+rq.z <- function(z) {
+  m.aux <- z$m$model 
+  means <- m.aux$summary.fixed[, "mean"]
+  precs <- m.aux$summary.hyperpar[, "mean"]
+
+  ws <- get.probs(z$z)
+
+  z.sim <- sapply(1:length(z$z), function (X) {
+    aux <- ws * dnorm(y[X], means, scale.sigma * sqrt(1 / precs))
+    sample(1:n.grp, 1, prob = aux / sum(aux))
+  })
+
+  #Fit model
+  z.model <- fit.inla.internal(y, z.sim)
+
+  #New value
+  z.new <- list(z = z.sim, m = z.model)
+
+  return(z.new)
+}
+
+# The prior distribution on z is simply the product of Bernoullis with probability 0.5 to provide a vague prior:
+#z: Vector of integer values from 1 to K.
+prior.z <- function(z, log = TRUE) {
+
+  res <- log(1 / n.grp) * length(z$z)
+  if(log) {
+    return(res)
+  }
+  else {
+    return(exp(res))
+  }
+}
+
+fit.inla <- function(y, grp) {
+  return(grp$m)
+}
+
+#Run simulations
+library("INLABMA")
+inlamh.res <- INLAMH(geiser$duration, fit.inla, grp.init, rq.z, dq.z, 
+  prior.z, n.sim = 100, n.burnin = 20, n.thin = 5, verbose = TRUE)
+
+# List of fitted models
+zz <- do.call(rbind, lapply(inlamh.res$b.sim, function(X){X$z}))
+
+# posterior probabilities of belonging to each group
+zz.probs <- apply(zz, 2, get.probs)
+
+# Conditional marginal likelihood
+mliks <- do.call(rbind, lapply(inlamh.res$model.sim, function(X){X$mlik}))
+
+
+```
+
+## Model selection
+
+```{r}
+z.idx <- 60
+
+#Marginal likelihood (log-scale)
+mliks[z.idx]
+
+#Prior (log-scale)
+prior.z(inlamh.res$b.sim[[z.idx]])
+
+#Posterior probabilities
+z.post <- table(apply(zz, 1, function(x) {paste(x, collapse = "")})) / 100
+
+# Get post. prob. of z^* in the log-scale
+log.pprob <- unname( 
+  log(z.post[names(z.post) ==
+    paste(inlamh.res$b.sim[[z.idx]]$z, collapse = "")])
+)
+log.pprob
+
+# Estimate of the marginal likelihood
+mlik.mix <- mliks[z.idx] + prior.z(inlamh.res$b.sim[[z.idx]]) - log.pprob
+mlik.mix
+```
+
